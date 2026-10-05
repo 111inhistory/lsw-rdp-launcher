@@ -1,0 +1,96 @@
+name: Release Build & Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-release-linux:
+    name: Build & Package Linux Host
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package Linux release archive
+        run: |
+          mkdir -p release-pkg
+          cp target/release/rdp-launcher release-pkg/
+          cp -r scripts release-pkg/
+          cp README.md release-pkg/
+          tar -czvf rdp-launcher-linux-x86_64.tar.gz -C release-pkg .
+
+      - name: Upload Linux Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-launcher-linux-x86_64
+          path: rdp-launcher-linux-x86_64.tar.gz
+
+  build-release-windows:
+    name: Build & Package Windows Guest Agent
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        working-directory: windows-agent
+        run: cargo build --release
+
+      - name: Package Windows release archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release-pkg -Force | Out-Null
+          Copy-Item -Path windows-agent/target/release/remoteapp-launcher.exe -Destination release-pkg/
+          Copy-Item -Path windows-agent/install.ps1 -Destination release-pkg/
+          Compress-Archive -Path release-pkg/* -DestinationPath remoteapp-launcher-windows-x86_64.zip
+
+      - name: Upload Windows Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: remoteapp-launcher-windows-x86_64
+          path: remoteapp-launcher-windows-x86_64.zip
+
+  publish-github-release:
+    name: Create GitHub Release
+    needs: [build-release-linux, build-release-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux archive
+        uses: actions/download-artifact@v4
+        with:
+          name: rdp-launcher-linux-x86_64
+          path: ./
+
+      - name: Download Windows archive
+        uses: actions/download-artifact@v4
+        with:
+          name: remoteapp-launcher-windows-x86_64
+          path: ./
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rdp-launcher-linux-x86_64.tar.gz
+            remoteapp-launcher-windows-x86_64.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true

@@ -1,0 +1,17 @@
+[Unit]
+Description=RDP & VM Lifecycle Watcher (Idle Disconnect & VM Suspend)
+After=network.target virtqemud.service libvirtd.service
+
+[Service]
+Type=simple
+User=%USER%
+Group=%USER%
+Environment=HOME=%HOME%
+Environment=XDG_RUNTIME_DIR=/run/user/%UID%
+Environment=WAYLAND_DISPLAY=%WAYLAND_DISPLAY%
+ExecStart=/usr/local/bin/rdp-launcher watcher
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

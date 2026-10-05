@@ -417,7 +417,7 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     }
 
     println!("[rdp-launcher] Awaiting remote daemon initialization...");
-    let probe_cmd = "pwsh -NoProfile -Command \"& 'E:\\LanguageSpecific\\Rust\\remoteapp-launcher\\target\\release\\remoteapp-launcher.exe' ping\"".to_string();
+    let probe_cmd = format!("pwsh -NoProfile -Command \"& '{}' ping\"", daemon_app);
 
     let mut ready = false;
     for i in 0..60 {
@@ -445,12 +445,16 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn sync_remote_apps(user: &str, host: &str, create_desktop: bool) -> Result<()> {
+fn sync_remote_apps(config: &Config, create_desktop: bool) -> Result<()> {
+    let user = &config.server.user;
+    let host = resolve_host_ip(config);
+    let daemon_app = &config.remoteapp.default_app;
+
     println!("Fetching installed applications from {}@{} via SSH...", user, host);
 
-    let remote_cmd = "pwsh -NoProfile -Command \"& 'E:\\LanguageSpecific\\Rust\\remoteapp-launcher\\target\\release\\remoteapp-launcher.exe' list-apps --with-icons | Out-String\"";
+    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' list-apps --with-icons | Out-String\"", daemon_app);
     let output = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), remote_cmd.to_string()])
+        .args(&[format!("{}@{}", user, host), remote_cmd])
         .output()
         .context("Failed to execute SSH command")?;
 
@@ -572,9 +576,10 @@ fn run_remote_target(config: &Config, target: &str) -> Result<()> {
 
     let user = &config.server.user;
     let host = resolve_host_ip(config);
+    let daemon_app = &config.remoteapp.default_app;
     println!("[rdp-launcher] Requesting remote host {}@{} to launch '{}'...", user, host, resolved_target);
 
-    let remote_cmd = format!("pwsh -NoProfile -Command \"& 'E:\\LanguageSpecific\\Rust\\remoteapp-launcher\\target\\release\\remoteapp-launcher.exe' run '{}'\"", resolved_target);
+    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' run '{}'\"", daemon_app, resolved_target);
     let status = Command::new("ssh")
         .args(&[format!("{}@{}", user, host), remote_cmd])
         .status()
@@ -587,11 +592,15 @@ fn run_remote_target(config: &Config, target: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn stop_remote_daemon(user: &str, host: &str) -> Result<()> {
+pub fn stop_remote_daemon(config: &Config) -> Result<()> {
+    let user = &config.server.user;
+    let host = resolve_host_ip(config);
+    let daemon_app = &config.remoteapp.default_app;
+
     println!("Stopping RemoteApp daemon on {}@{}...", user, host);
-    let remote_cmd = "pwsh -NoProfile -Command \"& 'E:\\LanguageSpecific\\Rust\\remoteapp-launcher\\target\\release\\remoteapp-launcher.exe' stop\"";
+    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' stop\"", daemon_app);
     let _ = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), remote_cmd.to_string()])
+        .args(&[format!("{}@{}", user, host), remote_cmd])
         .status();
 
     let _ = Command::new("pkill").arg("-x").arg("sdl-freerdp").status();
@@ -695,8 +704,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::SyncApps { create_desktop_entries } => {
-            let resolved_host = resolve_host_ip(&config);
-            sync_remote_apps(user, &resolved_host, create_desktop_entries)?;
+            sync_remote_apps(&config, create_desktop_entries)?;
         }
         Commands::ListApps => {
             list_cached_apps()?;
@@ -705,8 +713,7 @@ fn main() -> Result<()> {
             run_remote_target(&config, &target)?;
         }
         Commands::StopDaemon => {
-            let resolved_host = resolve_host_ip(&config);
-            stop_remote_daemon(user, &resolved_host)?;
+            stop_remote_daemon(&config)?;
         }
         Commands::Watcher => {
             lifecycle::run_watcher(config)?;

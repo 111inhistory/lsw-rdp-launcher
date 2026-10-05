@@ -221,7 +221,7 @@ pub fn run_watcher(config: Config) -> Result<()> {
                 let start = rdp_idle_start.get_or_insert_with(Instant::now);
                 if rdp_timeout_secs > 0 && start.elapsed() >= Duration::from_secs(rdp_timeout_secs) {
                     println!("[lifecycle] No RemoteApp windows open for {}s. Disconnecting FreeRDP session...", rdp_timeout_secs);
-                    let _ = crate::stop_remote_daemon(&config.server.user, &config.server.host);
+                    let _ = crate::stop_remote_daemon(&config);
                     rdp_idle_start = None;
                 }
             }

@@ -1,0 +1,81 @@
+name: CI Build & Test
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux-host:
+    name: Build Linux Host (rdp-launcher)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-host-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-host-
+
+      - name: Cargo Check & Build
+        run: |
+          cargo check --verbose
+          cargo build --release --verbose
+
+      - name: Upload Linux Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-launcher-linux-x86_64
+          path: target/release/rdp-launcher
+
+  build-windows-agent:
+    name: Build Windows Agent (remoteapp-launcher)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            windows-agent/target
+          key: ${{ runner.os }}-cargo-agent-${{ hashFiles('windows-agent/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-agent-
+
+      - name: Build Windows Agent
+        working-directory: windows-agent
+        run: |
+          cargo check --verbose
+          cargo build --release --verbose
+
+      - name: Upload Windows Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remoteapp-launcher-windows-x86_64
+          path: windows-agent/target/release/remoteapp-launcher.exe

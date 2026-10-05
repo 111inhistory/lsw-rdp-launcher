@@ -1,0 +1,42 @@
+module virtqemud_custom 1.0;
+
+require {
+	type kmod_exec_t;
+	type virt_etc_t;
+	type pidfs_t;
+	type virtqemud_t;
+	type systemd_systemctl_exec_t;
+	type unconfined_service_t;
+	type unlabeled_t;
+	type setroubleshootd_t;
+	type modules_object_t;
+	type svirt_tmpfs_t;
+	type modules_dep_t;
+	type init_t;
+	class file { execute execute_no_trans map open read };
+	class lnk_file read;
+	class system module_load;
+	class chr_file { getattr relabelto };
+	class filesystem getattr;
+	class dir search;
+}
+
+# Allow init_t to execute unlabeled files if encountered
+allow init_t unlabeled_t:file execute;
+
+# Allow setroubleshootd
+allow setroubleshootd_t svirt_tmpfs_t:chr_file getattr;
+
+# Allow virtqemud daemon to inspect client proc and execute systemctl in hooks
+allow virtqemud_t init_t:lnk_file read;
+allow virtqemud_t kmod_exec_t:file { execute execute_no_trans };
+allow virtqemud_t kmod_exec_t:file map;
+allow virtqemud_t modules_dep_t:file map;
+allow virtqemud_t modules_object_t:system module_load;
+allow virtqemud_t pidfs_t:filesystem getattr;
+allow virtqemud_t svirt_tmpfs_t:chr_file { getattr relabelto };
+allow virtqemud_t systemd_systemctl_exec_t:file { execute execute_no_trans };
+allow virtqemud_t systemd_systemctl_exec_t:file map;
+allow virtqemud_t unconfined_service_t:dir search;
+allow virtqemud_t unconfined_service_t:file { open read };
+allow virtqemud_t virt_etc_t:file { execute execute_no_trans };
