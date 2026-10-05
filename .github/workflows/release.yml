@@ -73,24 +73,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download Linux archive
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: rdp-launcher-linux-x86_64
-          path: ./
-
-      - name: Download Windows archive
-        uses: actions/download-artifact@v4
-        with:
-          name: remoteapp-launcher-windows-x86_64
-          path: ./
+          path: release-assets
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            rdp-launcher-linux-x86_64.tar.gz
-            remoteapp-launcher-windows-x86_64.zip
+          files: release-assets/*
           draft: false
           prerelease: false
           generate_release_notes: true
