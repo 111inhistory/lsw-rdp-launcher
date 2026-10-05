@@ -1,4 +1,5 @@
 #![windows_subsystem = "windows"]
+#![allow(non_snake_case, dead_code)]
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -115,7 +116,6 @@ extern "system" {
 
 #[link(name = "user32")]
 extern "system" {
-    fn ExitWindowsEx(uFlags: u32, dwReason: u32) -> BOOL;
     fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
     fn PrivateExtractIconsW(
         szFileName: *const u16,
@@ -690,8 +690,17 @@ fn run_daemon() {
                         } else if msg.starts_with("RUN ") {
                             let cmd_to_run = msg[4..].trim().to_string();
                             std::thread::spawn(move || {
-                                launch_application(&cmd_to_run);
+                                launch_application(&cmd_to_run, None);
                             });
+                        } else if msg.starts_with("RUN_PARAMS ") {
+                            let payload = msg[11..].trim().to_string();
+                            if let Some((app_file, params)) = payload.split_once('\t') {
+                                let app_file = app_file.to_string();
+                                let params = params.to_string();
+                                std::thread::spawn(move || {
+                                    launch_application(&app_file, Some(&params));
+                                });
+                            }
                         } else if msg == "QUIT" || msg == "STOP" {
                                                         PostMessageW(hwnd_for_pipe as HWND, WM_DESTROY, 0, 0);
                             DisconnectNamedPipe(hpipe);
@@ -715,33 +724,12 @@ fn run_daemon() {
     }
 }
 
-fn split_cmd_and_params(cmd: &str) -> (String, Option<String>) {
-    let trimmed = cmd.trim();
-    if trimmed.starts_with('"') {
-        if let Some(end_quote) = trimmed[1..].find('"') {
-            let file = &trimmed[1..1 + end_quote];
-            let rest = trimmed[1 + end_quote + 1..].trim();
-            let params = if rest.is_empty() { None } else { Some(rest.to_string()) };
-            return (file.to_string(), params);
-        }
-    }
-    // If it starts with an unquoted executable ending with .exe followed by space
-    if let Some(space_idx) = trimmed.find(' ') {
-        let first = &trimmed[..space_idx];
-        if first.to_lowercase().ends_with(".exe") || first.to_lowercase().ends_with(".bat") || first.to_lowercase().ends_with(".cmd") {
-            let rest = trimmed[space_idx + 1..].trim();
-            let params = if rest.is_empty() { None } else { Some(rest.to_string()) };
-            return (first.to_string(), params);
-        }
-    }
-    (trimmed.to_string(), None)
-}
-
-fn launch_application(cmd: &str) {
+fn launch_application(target: &str, params_opt: Option<&str>) {
     unsafe {
-        if cmd.contains('!') {
+        let clean_target = target.trim().trim_matches('"');
+        if clean_target.contains('!') {
             let explorer = to_wide("explorer.exe");
-            let param = to_wide(&format!("shell:AppsFolder\\{}", cmd));
+            let param = to_wide(&format!("shell:AppsFolder\\{}", clean_target));
             let open_verb = to_wide("open");
 
             let mut sei: SHELLEXECUTEINFOW = std::mem::zeroed();
@@ -756,9 +744,8 @@ fn launch_application(cmd: &str) {
             return;
         }
 
-        let (target_file, params) = split_cmd_and_params(cmd);
-        let wide_file = to_wide(&target_file);
-        let wide_params = params.as_deref().map(to_wide);
+        let wide_file = to_wide(clean_target);
+        let wide_params = params_opt.map(to_wide);
         let open_verb = to_wide("open");
 
         let mut sei: SHELLEXECUTEINFOW = std::mem::zeroed();
@@ -773,6 +760,40 @@ fn launch_application(cmd: &str) {
 
         ShellExecuteExW(&mut sei);
     }
+}
+
+fn resolve_target_and_params(args: &[String]) -> (String, Option<String>) {
+    let raw_joined = args.join(" ");
+    let clean_joined = raw_joined.trim().trim_matches('"');
+
+    // 1. If the entire string is an existing file or directory on disk, it's a single target
+    if Path::new(clean_joined).exists() {
+        return (clean_joined.to_string(), None);
+    }
+
+    // 2. Try to find an existing executable prefix among arguments
+    for i in (1..args.len()).rev() {
+        let prefix = args[..i].join(" ");
+        let clean_prefix = prefix.trim().trim_matches('"');
+        if Path::new(clean_prefix).is_file() {
+            let params = args[i..].join(" ");
+            let clean_params = params.trim();
+            return (clean_prefix.to_string(), if clean_params.is_empty() { None } else { Some(clean_params.to_string()) });
+        }
+    }
+
+    // 3. If first argument ends with .exe, assume first argument is binary and rest are params
+    if let Some(first) = args.first() {
+        let clean_first = first.trim().trim_matches('"');
+        if clean_first.to_lowercase().ends_with(".exe") || clean_first.to_lowercase().ends_with(".cmd") || clean_first.to_lowercase().ends_with(".bat") {
+            let params = args[1..].join(" ");
+            let clean_params = params.trim();
+            return (clean_first.to_string(), if clean_params.is_empty() { None } else { Some(clean_params.to_string()) });
+        }
+    }
+
+    // 4. Default fallback: treat entire string as target
+    (clean_joined.to_string(), None)
 }
 
 fn send_pipe_command(command: &str) -> bool {
@@ -814,16 +835,21 @@ fn main() {
         }
         "run" => {
             if args.len() > 2 {
-                let cmd = args[2..].join(" ");
-                if send_pipe_command(&format!("RUN {}", cmd)) {
-                    print_to_stdout(&format!("OK: {}\r\n", cmd));
+                let (target, params_opt) = resolve_target_and_params(&args[2..]);
+                let msg = if let Some(ref params) = params_opt {
+                    format!("RUN_PARAMS {}\t{}", target, params)
+                } else {
+                    format!("RUN {}", target)
+                };
+                if send_pipe_command(&msg) {
+                    print_to_stdout(&format!("OK: {}\r\n", msg));
                     std::process::exit(0);
                 } else {
                     eprintln!("Daemon pipe not ready");
                     std::process::exit(1);
                 }
             } else {
-                eprintln!("Usage: remoteapp-launcher.exe run <path_or_cmd>");
+                eprintln!("Usage: remoteapp-launcher.exe run <path_or_cmd> [args...]");
                 std::process::exit(1);
             }
         }

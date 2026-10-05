@@ -715,30 +715,32 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
 
         let win_path = mounts::path_to_windows(config, &clean_path)?;
         println!("[rdp-launcher] Mapped file: '{}' -> '{}'", clean_path, win_path);
-        win_paths.push(format!("\"{}\"", win_path));
+        win_paths.push(win_path);
     }
 
     ensure_freerdp_session(config)?;
 
-    let final_target = if let Some(app_name) = app {
-        let resolved_app = resolve_app_target(app_name);
-        format!("\"{}\" {}", resolved_app, win_paths.join(" "))
-    } else {
-        win_paths.join(" ")
-    };
-
     let user = &config.server.user;
     let host = resolve_host_ip(config);
     let daemon_app = &config.remoteapp.default_app;
+
+    let mut ssh_args = vec![
+        format!("{}@{}", user, host),
+        daemon_app.clone(),
+        "run".to_string(),
+    ];
+
+    if let Some(app_name) = app {
+        let resolved_app = resolve_app_target(app_name);
+        ssh_args.push(resolved_app);
+    }
+
+    ssh_args.extend(win_paths);
+
     println!("[rdp-launcher] Opening on Windows guest via RemoteApp...");
 
     let status = Command::new("ssh")
-        .args(&[
-            format!("{}@{}", user, host),
-            daemon_app.clone(),
-            "run".to_string(),
-            final_target,
-        ])
+        .args(&ssh_args)
         .status()
         .context("Failed to dispatch open command via SSH")?;
 
