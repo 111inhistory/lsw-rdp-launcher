@@ -43,6 +43,7 @@ extern "system" {
     fn GlobalLock(hMem: HGLOBAL) -> *mut std::ffi::c_void;
     fn GlobalUnlock(hMem: HGLOBAL) -> BOOL;
     fn GlobalSize(hMem: HGLOBAL) -> usize;
+    fn CreateMutexW(lpMutexAttributes: *mut std::ffi::c_void, bInitialOwner: BOOL, lpName: *const u16) -> HANDLE;
     fn CreateNamedPipeW(
         lpName: *const u16,
         dwOpenMode: u32,
@@ -601,6 +602,101 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
+const DEFAULT_TCP_PORT: u16 = 49152;
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "action")]
+pub enum AgentRequest {
+    #[serde(rename = "ping")]
+    Ping,
+    #[serde(rename = "run")]
+    Run { target: String, params: Option<String> },
+    #[serde(rename = "open")]
+    Open { file: String },
+    #[serde(rename = "list_apps")]
+    ListApps {
+        #[serde(default)]
+        with_icons: bool,
+    },
+    #[serde(rename = "quit")]
+    Quit,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AgentResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Vec<AppInfo>>,
+}
+
+fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
+    use std::io::{BufRead, BufReader, Write};
+
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(c) => c,
+        Err(_) => return,
+    });
+    let mut line = String::new();
+
+    if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
+        let req_res: Result<AgentRequest, _> = serde_json::from_str(line.trim());
+        let response = match req_res {
+            Ok(AgentRequest::Ping) => AgentResponse {
+                status: "ok".to_string(),
+                message: Some("pong".to_string()),
+                apps: None,
+            },
+            Ok(AgentRequest::Run { target, params }) => {
+                launch_application(&target, params.as_deref());
+                AgentResponse {
+                    status: "ok".to_string(),
+                    message: None,
+                    apps: None,
+                }
+            }
+            Ok(AgentRequest::Open { file }) => {
+                launch_application(&file, None);
+                AgentResponse {
+                    status: "ok".to_string(),
+                    message: None,
+                    apps: None,
+                }
+            }
+            Ok(AgentRequest::ListApps { with_icons }) => {
+                let apps = scan_shortcuts(with_icons);
+                AgentResponse {
+                    status: "ok".to_string(),
+                    message: None,
+                    apps: Some(apps),
+                }
+            }
+            Ok(AgentRequest::Quit) => {
+                unsafe {
+                    PostMessageW(hwnd, WM_DESTROY, 0, 0);
+                }
+                AgentResponse {
+                    status: "ok".to_string(),
+                    message: Some("quitting".to_string()),
+                    apps: None,
+                }
+            }
+            Err(e) => AgentResponse {
+                status: "error".to_string(),
+                message: Some(format!("Invalid request: {}", e)),
+                apps: None,
+            },
+        };
+
+        if let Ok(resp_json) = serde_json::to_string(&response) {
+            let _ = stream.write_all(resp_json.as_bytes());
+            let _ = stream.write_all(b"\n");
+            let _ = stream.flush();
+        }
+    }
+}
+
 enum LaunchTask {
     Launch { target: String, params: Option<String> },
     Quit,
@@ -663,6 +759,24 @@ fn run_daemon() {
 
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
         SetTimer(hwnd, TIMER_KEEPALIVE_ID, 60_000, None);
+
+        // TCP server listener thread (Port 49152) for direct low-latency commands from Linux host
+        let hwnd_for_tcp = hwnd as usize;
+        std::thread::spawn(move || {
+            let addr = format!("0.0.0.0:{}", DEFAULT_TCP_PORT);
+            if let Ok(listener) = std::net::TcpListener::bind(&addr) {
+                for stream in listener.incoming() {
+                    if !RUNNING.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Ok(mut s) = stream {
+                        handle_tcp_client(&mut s, hwnd_for_tcp as HWND);
+                    }
+                }
+            } else {
+                eprintln!("Failed to bind TCP listener on {}", addr);
+            }
+        });
 
         // Sequential FIFO task queue: multiple commands are processed strictly in arrival order
         let (task_tx, task_rx) = std::sync::mpsc::channel::<LaunchTask>();
@@ -834,6 +948,18 @@ fn main() {
     }
     let args: Vec<String> = std::env::args().collect();
     let subcommand = args.get(1).map(|s| s.as_str()).unwrap_or("daemon");
+
+    // Enforce strict singleton for the daemon instance in this session
+    if subcommand == "daemon" {
+        unsafe {
+            let mutex_name = to_wide("Local\\RemoteAppLauncher_Singleton_Mutex");
+            let h_mutex = CreateMutexW(ptr::null_mut(), FALSE, mutex_name.as_ptr());
+            if h_mutex.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
+                // Another instance is already running; exit silently
+                std::process::exit(0);
+            }
+        }
+    }
 
     match subcommand {
         "list-apps" => {

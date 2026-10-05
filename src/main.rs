@@ -1,3 +1,4 @@
+mod client;
 mod config;
 mod lifecycle;
 mod mounts;
@@ -504,26 +505,22 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
         drop(stdin);
     }
 
-    println!("[rdp-launcher] Awaiting remote daemon initialization...");
+    println!("[rdp-launcher] Awaiting remote daemon initialization via TCP...");
+    let client = client::AgentClient::new(&host, config.server.agent_port);
     let mut ready = false;
     for i in 0..60 {
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        let out = Command::new("ssh")
-            .args(&[format!("{}@{}", user, host), daemon_app.clone(), "ping".to_string()])
-            .output();
-        if let Ok(o) = out {
-            if o.status.success() {
-                ready = true;
-                break;
-            }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if client.ping().is_ok() {
+            ready = true;
+            break;
         }
         if (i + 1) % 10 == 0 {
-            println!("[rdp-launcher] Still awaiting remote daemon ({}s elapsed)...", i + 1);
+            println!("[rdp-launcher] Still awaiting remote daemon ({}s elapsed)...", (i + 1) / 2);
         }
     }
 
     if ready {
-        println!("[rdp-launcher] RemoteApp session and daemon pipe ready!");
+        println!("[rdp-launcher] RemoteApp session and TCP agent ready!");
     } else {
         println!("[rdp-launcher] Daemon initialization taking longer, proceeding...");
     }
@@ -532,31 +529,18 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
 }
 
 fn sync_remote_apps(config: &Config, create_desktop: bool) -> Result<()> {
-    let user = &config.server.user;
     let host = resolve_host_ip(config);
-    let daemon_app = &config.remoteapp.default_app;
-
-    println!("Fetching installed applications from {}@{} via SSH...", user, host);
-
-    let remote_cmd = format!("& '{}' list-apps --with-icons | Out-String", daemon_app);
-    let output = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), remote_cmd])
-        .output()
-        .context("Failed to execute SSH command")?;
-
-    if !output.status.success() {
-        bail!("Remote list-apps failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    let apps: Vec<RemoteAppInfo> = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse JSON response from remote host")?;
+    println!("Fetching installed applications from Windows agent via TCP...");
+    let client = client::get_or_ensure_client(config)?;
+    let apps = client.list_apps(true)?;
 
     let cache_dir = get_cache_dir();
     let icons_dir = cache_dir.join("icons");
     fs::create_dir_all(&icons_dir).context("Failed to create icons cache directory")?;
 
     let apps_cache_file = cache_dir.join("apps.json");
-    fs::write(&apps_cache_file, &output.stdout).context("Failed to write apps cache file")?;
+    let json_bytes = serde_json::to_vec_pretty(&apps)?;
+    fs::write(&apps_cache_file, &json_bytes).context("Failed to write apps cache file")?;
 
     let desktop_dir = get_desktop_dir();
     if create_desktop {
@@ -705,7 +689,11 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
         }
     }
 
-    let mut win_paths = Vec::new();
+    let resolved_app = app.map(resolve_app_target);
+    let client = client::get_or_ensure_client(config)?;
+
+    // Sequential FIFO processing on Linux host:
+    // Process each document in exact order through the high-performance TCP socket
     for f in file_paths {
         let clean_path = sanitize_file_path(f);
         let p = std::path::Path::new(&clean_path);
@@ -715,81 +703,33 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
 
         let win_path = mounts::path_to_windows(config, &clean_path)?;
         println!("[rdp-launcher] Mapped file: '{}' -> '{}'", clean_path, win_path);
-        win_paths.push(win_path);
-    }
 
-    ensure_freerdp_session(config)?;
+        if let Some(ref app_target) = resolved_app {
+            client.run_target(app_target, Some(&win_path))?;
+        } else {
+            client.open_file(&win_path)?;
+        }
 
-    let user = &config.server.user;
-    let host = resolve_host_ip(config);
-    let daemon_app = &config.remoteapp.default_app;
-
-    let mut ssh_args = vec![
-        format!("{}@{}", user, host),
-        daemon_app.clone(),
-        "run".to_string(),
-    ];
-
-    if let Some(app_name) = app {
-        let resolved_app = resolve_app_target(app_name);
-        ssh_args.push(resolved_app);
-    }
-
-    ssh_args.extend(win_paths);
-
-    println!("[rdp-launcher] Opening on Windows guest via RemoteApp...");
-
-    let status = Command::new("ssh")
-        .args(&ssh_args)
-        .status()
-        .context("Failed to dispatch open command via SSH")?;
-
-    if !status.success() {
-        bail!("Remote execution failed");
+        if file_paths.len() > 1 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
     }
 
     Ok(())
 }
 
 fn run_remote_target(config: &Config, target: &str) -> Result<()> {
-    // 1. Ensure FreeRDP session is running (and VM is resumed if needed)
-    ensure_freerdp_session(config)?;
-
-    // 2. Resolve target if it matches a cached Name or ID
     let resolved_target = resolve_app_target(target);
-
-    let user = &config.server.user;
-    let host = resolve_host_ip(config);
-    let daemon_app = &config.remoteapp.default_app;
-    println!("[rdp-launcher] Requesting remote host {}@{} to launch '{}'...", user, host, resolved_target);
-
-    let status = Command::new("ssh")
-        .args(&[
-            format!("{}@{}", user, host),
-            daemon_app.clone(),
-            "run".to_string(),
-            resolved_target,
-        ])
-        .status()
-        .context("Failed to send run command via SSH")?;
-
-    if !status.success() {
-        bail!("Remote execution failed");
-    }
-
+    let client = client::get_or_ensure_client(config)?;
+    println!("[rdp-launcher] Requesting Windows agent via TCP to launch '{}'...", resolved_target);
+    client.run_target(&resolved_target, None)?;
     Ok(())
 }
 
 pub fn stop_remote_daemon(config: &Config) -> Result<()> {
-    let user = &config.server.user;
     let host = resolve_host_ip(config);
-    let daemon_app = &config.remoteapp.default_app;
-
-    println!("Stopping RemoteApp daemon on {}@{}...", user, host);
-    let _ = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), daemon_app.clone(), "stop".to_string()])
-        .status();
-
+    let client = client::AgentClient::new(&host, config.server.agent_port);
+    let _ = client.stop_daemon();
     let _ = Command::new("pkill").arg("-x").arg("sdl-freerdp").status();
 
     println!("Session stopped.");

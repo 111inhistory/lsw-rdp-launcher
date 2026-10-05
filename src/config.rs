@@ -83,11 +83,17 @@ impl Default for SambaConfig {
     }
 }
 
+fn default_agent_port() -> u16 {
+    49152
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
     pub user: String,
     pub service: String,
+    #[serde(default = "default_agent_port")]
+    pub agent_port: u16,
 }
 
 impl Default for ServerConfig {
@@ -97,6 +103,7 @@ impl Default for ServerConfig {
             host: "auto".to_string(),
             user: default_user,
             service: "rdp-bridge".to_string(),
+            agent_port: 49152,
         }
     }
 }
@@ -258,6 +265,11 @@ impl Config {
                 old_val = self.server.user.clone();
                 self.server.user = val.to_string();
             }
+            "server.agent_port" | "agent_port" | "port" => {
+                old_val = self.server.agent_port.to_string();
+                let p: u16 = val.parse().context("Invalid port number")?;
+                self.server.agent_port = p;
+            }
             "server.service" | "service" => {
                 old_val = self.server.service.clone();
                 self.server.service = val.to_string();
@@ -364,6 +376,7 @@ impl Config {
         let val = match k.as_str() {
             "server.host" | "host" => self.server.host.clone(),
             "server.user" | "user" => self.server.user.clone(),
+            "server.agent_port" | "agent_port" | "port" => self.server.agent_port.to_string(),
             "server.service" | "service" => self.server.service.clone(),
             "freerdp.bin" | "freerdp_bin" | "bin" => self.freerdp.bin.clone(),
             "freerdp.video_driver" | "video_driver" => self.freerdp.video_driver.as_deref().unwrap_or("none").to_string(),
@@ -395,6 +408,7 @@ impl Config {
         vec![
             ("server.host", "string", self.server.host.clone(), "Windows VM hostname or static IP"),
             ("server.user", "string", self.server.user.clone(), "Windows RDP username"),
+            ("server.agent_port", "u16", self.server.agent_port.to_string(), "TCP port of the Windows remoteapp-launcher agent"),
             ("server.service", "string", self.server.service.clone(), "Keyring service name for credentials"),
             ("freerdp.bin", "path", self.freerdp.bin.clone(), "Path to sdl-freerdp binary"),
             ("freerdp.video_driver", "option<str>", self.freerdp.video_driver.as_deref().unwrap_or("none").to_string(), "SDL video driver ('wayland', 'x11', or none)"),
