@@ -601,6 +601,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
+enum LaunchTask {
+    Launch { target: String, params: Option<String> },
+    Quit,
+}
+
 fn run_daemon() {
     unsafe {
         let chwnd = GetConsoleWindow();
@@ -659,7 +664,22 @@ fn run_daemon() {
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
         SetTimer(hwnd, TIMER_KEEPALIVE_ID, 60_000, None);
 
+        // Sequential FIFO task queue: multiple commands are processed strictly in arrival order
+        let (task_tx, task_rx) = std::sync::mpsc::channel::<LaunchTask>();
+        std::thread::spawn(move || {
+            while let Ok(task) = task_rx.recv() {
+                match task {
+                    LaunchTask::Launch { target, params } => {
+                        launch_application(&target, params.as_deref());
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    }
+                    LaunchTask::Quit => break,
+                }
+            }
+        });
+
         let hwnd_for_pipe = hwnd as usize;
+        let pipe_tx = task_tx.clone();
         std::thread::spawn(move || {
             let pipe_w = to_wide(PIPE_NAME);
             while RUNNING.load(Ordering::SeqCst) {
@@ -689,20 +709,18 @@ fn run_daemon() {
                             // Health check probe, ignore without spawning any process
                         } else if msg.starts_with("RUN ") {
                             let cmd_to_run = msg[4..].trim().to_string();
-                            std::thread::spawn(move || {
-                                launch_application(&cmd_to_run, None);
-                            });
+                            let _ = pipe_tx.send(LaunchTask::Launch { target: cmd_to_run, params: None });
                         } else if msg.starts_with("RUN_PARAMS ") {
                             let payload = msg[11..].trim().to_string();
                             if let Some((app_file, params)) = payload.split_once('\t') {
-                                let app_file = app_file.to_string();
-                                let params = params.to_string();
-                                std::thread::spawn(move || {
-                                    launch_application(&app_file, Some(&params));
+                                let _ = pipe_tx.send(LaunchTask::Launch {
+                                    target: app_file.to_string(),
+                                    params: Some(params.to_string()),
                                 });
                             }
                         } else if msg == "QUIT" || msg == "STOP" {
-                                                        PostMessageW(hwnd_for_pipe as HWND, WM_DESTROY, 0, 0);
+                            let _ = pipe_tx.send(LaunchTask::Quit);
+                            PostMessageW(hwnd_for_pipe as HWND, WM_DESTROY, 0, 0);
                             DisconnectNamedPipe(hpipe);
                             CloseHandle(hpipe);
                             break;
