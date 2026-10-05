@@ -45,10 +45,34 @@ pub struct FreeRdpConfig {
     pub extra_args: Vec<String>,
 }
 
+pub fn find_default_freerdp_bin() -> String {
+    // 1. Check PATH
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("sdl-freerdp");
+            if candidate.is_file() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+    // 2. Check standard system and local dev paths
+    for candidate in &[
+        "/usr/local/bin/sdl-freerdp",
+        "/usr/bin/sdl-freerdp",
+        "/code/freerdp/build/client/SDL/SDL3/sdl-freerdp",
+    ] {
+        if std::path::Path::new(candidate).is_file() {
+            return candidate.to_string();
+        }
+    }
+    // 3. Generic command fallback
+    "sdl-freerdp".to_string()
+}
+
 impl Default for FreeRdpConfig {
     fn default() -> Self {
         Self {
-            bin: "/code/freerdp/build/client/SDL/SDL3/sdl-freerdp".to_string(),
+            bin: find_default_freerdp_bin(),
             video_driver: Some("wayland".to_string()),
             scale_desktop: Some(200),
             scale: None,
@@ -68,7 +92,7 @@ pub struct RemoteAppConfig {
 impl Default for RemoteAppConfig {
     fn default() -> Self {
         Self {
-            default_app: "E:\\LanguageSpecific\\Rust\\remoteapp-launcher\\target\\release\\remoteapp-launcher.exe".to_string(),
+            default_app: "remoteapp-launcher.exe".to_string(),
         }
     }
 }

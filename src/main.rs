@@ -322,6 +322,42 @@ fn ensure_display_environment() -> Result<()> {
     Ok(())
 }
 
+pub fn resolve_freerdp_binary(configured: &str) -> Result<String> {
+    let p = std::path::Path::new(configured);
+    if p.is_file() {
+        return Ok(configured.to_string());
+    }
+
+    // Search PATH
+    let target = if configured.is_empty() { "sdl-freerdp" } else { configured };
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(target);
+            if candidate.is_file() {
+                return Ok(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Common standard fallbacks
+    for fb in &[
+        "/usr/local/bin/sdl-freerdp",
+        "/usr/bin/sdl-freerdp",
+        "/code/freerdp/build/client/SDL/SDL3/sdl-freerdp",
+    ] {
+        if std::path::Path::new(fb).is_file() {
+            return Ok(fb.to_string());
+        }
+    }
+
+    bail!(
+        "FreeRDP binary '{}' not found in filesystem or PATH.\n\
+        Please install sdl-freerdp into your system PATH, or specify the binary path using:\n\
+          rdp-launcher config set freerdp.bin /path/to/sdl-freerdp",
+        configured
+    );
+}
+
 fn ensure_freerdp_session(config: &Config) -> Result<()> {
     ensure_display_environment()?;
 
@@ -339,10 +375,7 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     }
     println!("[rdp-launcher] {}:3389 is online! Starting RemoteApp daemon...", host);
 
-    let freerdp_bin = &config.freerdp.bin;
-    if !std::path::Path::new(freerdp_bin).exists() {
-        bail!("FreeRDP binary not found at: {}", freerdp_bin);
-    }
+    let freerdp_bin = resolve_freerdp_binary(&config.freerdp.bin)?;
 
     let service = &config.server.service;
     let user = &config.server.user;
@@ -385,7 +418,7 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
         .open(&log_path)
         .with_context(|| format!("Failed to open log file at {:?}", log_path))?;
 
-    let mut cmd = Command::new(freerdp_bin);
+    let mut cmd = Command::new(&freerdp_bin);
     cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(log_file.try_clone()?))
@@ -724,10 +757,7 @@ fn main() -> Result<()> {
         Commands::Launch { app, extra_args } => {
             ensure_display_environment()?;
 
-            let freerdp_bin = &config.freerdp.bin;
-            if !std::path::Path::new(freerdp_bin).exists() {
-                bail!("FreeRDP binary not found at: {}", freerdp_bin);
-            }
+            let freerdp_bin = resolve_freerdp_binary(&config.freerdp.bin)?;
 
             let app_to_launch = app.unwrap_or_else(|| config.remoteapp.default_app.clone());
             let password = get_or_prompt_password(service, user)?;
@@ -761,7 +791,7 @@ fn main() -> Result<()> {
             args.extend(config.freerdp.extra_args.clone());
             args.extend(extra_args);
 
-            let mut cmd = Command::new(freerdp_bin);
+            let mut cmd = Command::new(&freerdp_bin);
             cmd.args(&args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::inherit())
