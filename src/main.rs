@@ -53,6 +53,28 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Show full configuration file in TOML format
+    Show,
+    /// List all configurable keys, types, current values and descriptions
+    List,
+    /// Get the value of a specific config key
+    Get {
+        /// The config key (e.g. 'server.host', 'lifecycle.vm_suspend_timeout')
+        key: String,
+    },
+    /// Set the value of a specific config key
+    Set {
+        /// The config key (e.g. 'server.host', 'scale_desktop', 'vm_suspend_timeout')
+        key: String,
+        /// The new value (e.g. '192.168.122.14', '600', 'false')
+        value: String,
+    },
+    /// Print the filesystem path of the configuration file
+    Path,
+}
+
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Save or update the Windows password in the system Keyring
     SetPassword {
@@ -73,6 +95,26 @@ enum Commands {
 
     /// Show current loaded configuration
     ShowConfig,
+
+    /// View, get, or set configuration values directly from the CLI
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
+
+    /// Shorthand to set a config value: rdp-launcher set-config <KEY> <VALUE>
+    SetConfig {
+        /// Config key (e.g. 'server.host', 'scale_desktop', 'vm_suspend_timeout')
+        key: String,
+        /// New value
+        value: String,
+    },
+
+    /// Shorthand to get a config value: rdp-launcher get-config <KEY>
+    GetConfig {
+        /// Config key (e.g. 'server.host', 'vm_name')
+        key: String,
+    },
 
     /// Launch FreeRDP with the daemon or specific application
     Launch {
@@ -607,6 +649,50 @@ fn main() -> Result<()> {
             println!("Loaded config from {:?}:\n", config_path);
             let toml_str = toml::to_string_pretty(&config)?;
             println!("{}", toml_str);
+        }
+        Commands::GetConfig { key } => {
+            let val = config.get_key(&key)?;
+            println!("{}", val);
+        }
+        Commands::SetConfig { key, value } => {
+            let old_val = config.set_key(&key, &value)?;
+            config.save(&config_path)?;
+            println!("Updated '{}': '{}' -> '{}'", key, old_val, value);
+            println!("Saved changes to {:?}", config_path);
+        }
+        Commands::Config { action } => {
+            match action.unwrap_or(ConfigAction::List) {
+                ConfigAction::Show => {
+                    println!("Configuration file: {:?}\n", config_path);
+                    let toml_str = toml::to_string_pretty(&config)?;
+                    println!("{}", toml_str);
+                }
+                ConfigAction::Path => {
+                    println!("{:?}", config_path);
+                }
+                ConfigAction::List => {
+                    println!("Configuration File: {:?}\n", config_path);
+                    println!("{:<36} {:<14} {:<24} {}", "KEY", "TYPE", "CURRENT VALUE", "DESCRIPTION");
+                    println!("{}", "-".repeat(110));
+                    for (k, t, val, desc) in config.list_keys() {
+                        println!("{:<36} {:<14} {:<24} {}", k, t, val, desc);
+                    }
+                    println!("\nUsage:");
+                    println!("  rdp-launcher config set <KEY> <VALUE>    # Update a configuration value");
+                    println!("  rdp-launcher config get <KEY>            # Retrieve a configuration value");
+                    println!("  rdp-launcher config show                 # Display raw TOML format");
+                }
+                ConfigAction::Get { key } => {
+                    let val = config.get_key(&key)?;
+                    println!("{}", val);
+                }
+                ConfigAction::Set { key, value } => {
+                    let old_val = config.set_key(&key, &value)?;
+                    config.save(&config_path)?;
+                    println!("Successfully updated '{}': '{}' -> '{}'", key, old_val, value);
+                    println!("Saved changes to {:?}", config_path);
+                }
+            }
         }
         Commands::SyncApps { create_desktop_entries } => {
             let resolved_host = resolve_host_ip(&config);
