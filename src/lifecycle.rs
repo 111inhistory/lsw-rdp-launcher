@@ -1,6 +1,7 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crate::config::Config;
 use crate::is_freerdp_running;
 
@@ -70,27 +71,74 @@ pub fn has_active_ssh(vm_ips: &[String], fallback_host: &str) -> bool {
     false
 }
 
-pub fn count_active_rdp_windows() -> (usize, Vec<String>) {
-    let mut titles = Vec::new();
-    let output = Command::new("niri").args(&["msg", "-j", "windows"]).output();
+/// Resolves the Niri IPC socket path with multi-stage fallback
+fn resolve_niri_socket() -> Option<PathBuf> {
+    // 1. Direct environment variable
+    if let Ok(sock) = std::env::var("NIRI_SOCKET") {
+        let p = PathBuf::from(sock);
+        if p.exists() {
+            return Some(p);
+        }
+    }
 
-    if let Ok(out) = output {
-        if out.status.success() {
-            if let Ok(windows) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
-                for w in windows {
-                    if let Some(app_id) = w.get("app_id").and_then(|v| v.as_str()) {
-                        if app_id == "com.freerdp.client.sdl3" {
-                            let title = w.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
-                            titles.push(title);
-                        }
-                    }
-                }
+    // 2. Scan XDG_RUNTIME_DIR / /run/user/<uid> for active niri.*.sock
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+        let uid = unsafe {
+            extern "C" { fn getuid() -> u32; }
+            getuid()
+        };
+        format!("/run/user/{}", uid)
+    });
+
+    let runtime_path = Path::new(&runtime_dir);
+    if let Ok(entries) = std::fs::read_dir(runtime_path) {
+        let mut candidates = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("niri") && name.ends_with(".sock") {
+                candidates.push(entry.path());
+            }
+        }
+        if let Some(first) = candidates.first() {
+            return Some(first.clone());
+        }
+    }
+
+    None
+}
+
+/// Counts active FreeRDP RemoteApp client windows in the compositor with explicit error handling.
+pub fn count_active_rdp_windows() -> Result<(usize, Vec<String>)> {
+    let mut cmd = Command::new("niri");
+    cmd.args(&["msg", "-j", "windows"]);
+
+    // Apply socket fallback if missing from environment (e.g. inside systemd service)
+    if let Some(sock_path) = resolve_niri_socket() {
+        cmd.env("NIRI_SOCKET", sock_path);
+    }
+
+    let output = cmd.output().context("Failed to spawn 'niri msg'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("niri msg failed: {}", stderr.trim());
+    }
+
+    let windows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse JSON output from 'niri msg'")?;
+
+    let mut titles = Vec::new();
+    for w in windows {
+        if let Some(app_id) = w.get("app_id").and_then(|v| v.as_str()) {
+            if app_id == "com.freerdp.client.sdl3" {
+                let title = w.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
+                titles.push(title);
             }
         }
     }
 
     let count = titles.len();
-    (count, titles)
+    Ok((count, titles))
 }
 
 pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
@@ -203,7 +251,15 @@ pub fn run_watcher(config: Config) -> Result<()> {
         // 3. Check FreeRDP session & window count
         let freerdp_active = is_freerdp_running();
         let (window_count, _titles) = if freerdp_active {
-            count_active_rdp_windows()
+            match count_active_rdp_windows() {
+                Ok(res) => res,
+                Err(e) => {
+                    eprintln!("[lifecycle] Warning: Cannot query compositor windows: {}. Inhibiting idle disconnect.", e);
+                    // Safe error handling: do NOT assume 0 windows when query fails!
+                    rdp_idle_start = None;
+                    (1, vec![])
+                }
+            }
         } else {
             (0, vec![])
         };
@@ -269,10 +325,16 @@ pub fn show_lifecycle_status(config: &Config) -> Result<()> {
     println!("FreeRDP Connection:  {}", if freerdp_active { "Connected" } else { "Disconnected" });
 
     if freerdp_active {
-        let (count, titles) = count_active_rdp_windows();
-        println!("RemoteApp Windows:   {} active", count);
-        for t in titles {
-            println!("  - {}", t);
+        match count_active_rdp_windows() {
+            Ok((count, titles)) => {
+                println!("RemoteApp Windows:   {} active", count);
+                for t in titles {
+                    println!("  - {}", t);
+                }
+            }
+            Err(e) => {
+                println!("RemoteApp Windows:   Query failed ({})", e);
+            }
         }
     }
 
