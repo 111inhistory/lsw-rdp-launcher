@@ -1,5 +1,6 @@
 mod config;
 mod lifecycle;
+mod mounts;
 
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -50,6 +51,14 @@ struct Cli {
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MountsAction {
+    /// List all configured Windows drive to Linux directory mappings
+    List,
+    /// Automatically query Samba config and Windows guest to discover and sync mounts
+    Sync,
 }
 
 #[derive(Subcommand, Debug)]
@@ -150,6 +159,34 @@ enum Commands {
 
     /// Show lifecycle status of VM, SSH, FreeRDP and RemoteApp windows
     LifecycleStatus,
+
+    /// Manage, view, or sync the SMB to Windows drive mount table
+    Mounts {
+        #[command(subcommand)]
+        action: Option<MountsAction>,
+    },
+
+    /// Translate a path between Linux host and Windows guest
+    Path {
+        /// The path to translate (Linux path like '/data/...' or Windows path like 'J:\...')
+        path: String,
+        /// Force translation from Linux to Windows
+        #[arg(long)]
+        to_win: bool,
+        /// Force translation from Windows to Linux
+        #[arg(long)]
+        to_linux: bool,
+    },
+
+    /// Open a Linux file directly in Windows (e.g. Office 365, Excel, Word) via RemoteApp
+    Open {
+        /// Linux file path to open (must be within a shared mount)
+        file: String,
+
+        /// Optional: specific application name, ID or path to open the file with
+        #[arg(short, long)]
+        app: Option<String>,
+    },
 }
 
 fn get_keyring_entry(service: &str, user: &str) -> Result<Entry> {
@@ -599,13 +636,9 @@ fn list_cached_apps() -> Result<()> {
     Ok(())
 }
 
-fn run_remote_target(config: &Config, target: &str) -> Result<()> {
-    // 1. Ensure FreeRDP session is running (and VM is resumed if needed)
-    ensure_freerdp_session(config)?;
-
-    // 2. Resolve target if it matches a cached Name or ID
+fn resolve_app_target(target: &str) -> String {
     let target_lower = target.to_lowercase();
-    let resolved_target = if let Ok(data) = fs::read_to_string(get_cache_dir().join("apps.json")) {
+    if let Ok(data) = fs::read_to_string(get_cache_dir().join("apps.json")) {
         if let Ok(apps) = serde_json::from_str::<Vec<RemoteAppInfo>>(&data) {
             if let Some(app) = apps.iter().find(|a| {
                 a.id.eq_ignore_ascii_case(target) 
@@ -613,19 +646,61 @@ fn run_remote_target(config: &Config, target: &str) -> Result<()> {
                 || a.target.to_lowercase().ends_with(&format!("\\{}.exe", target_lower))
                 || a.target.to_lowercase().ends_with(&format!("/{}.exe", target_lower))
                 || (target_lower == "notepad" && a.target.to_lowercase().contains("notepad"))
+                || (target_lower == "excel" && (a.id == "excel" || a.target.to_lowercase().contains("excel")))
+                || (target_lower == "word" && (a.id == "word" || a.target.to_lowercase().contains("winword")))
+                || (target_lower == "powerpoint" && (a.id == "powerpoint" || a.target.to_lowercase().contains("powerpnt")))
                 || (target_lower == "calc" && (a.id == "calculator" || a.target.to_lowercase().contains("calculator")))
                 || (target_lower == "cmd" && (a.id == "command-prompt" || a.target.to_lowercase().ends_with("\\cmd.exe")))
             }) {
-                app.target.clone()
-            } else {
-                target.to_string()
+                return app.target.clone();
             }
-        } else {
-            target.to_string()
         }
+    }
+    target.to_string()
+}
+
+fn open_remote_file(config: &Config, file_path_str: &str, app: Option<&str>) -> Result<()> {
+    let p = std::path::Path::new(file_path_str);
+    if !p.exists() {
+        bail!("File '{}' does not exist on host.", file_path_str);
+    }
+
+    let win_path = mounts::path_to_windows(config, file_path_str)?;
+    println!("[rdp-launcher] Mapped file: '{}' -> '{}'", file_path_str, win_path);
+
+    ensure_freerdp_session(config)?;
+
+    let final_target = if let Some(app_name) = app {
+        let resolved_app = resolve_app_target(app_name);
+        format!("\"{}\" \"{}\"", resolved_app, win_path)
     } else {
-        target.to_string()
+        format!("\"{}\"", win_path)
     };
+
+    let user = &config.server.user;
+    let host = resolve_host_ip(config);
+    let daemon_app = &config.remoteapp.default_app;
+    println!("[rdp-launcher] Opening on Windows guest via RemoteApp...");
+
+    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' run '{}'\"", daemon_app, final_target);
+    let status = Command::new("ssh")
+        .args(&[format!("{}@{}", user, host), remote_cmd])
+        .status()
+        .context("Failed to dispatch open command via SSH")?;
+
+    if !status.success() {
+        bail!("Remote execution failed");
+    }
+
+    Ok(())
+}
+
+fn run_remote_target(config: &Config, target: &str) -> Result<()> {
+    // 1. Ensure FreeRDP session is running (and VM is resumed if needed)
+    ensure_freerdp_session(config)?;
+
+    // 2. Resolve target if it matches a cached Name or ID
+    let resolved_target = resolve_app_target(target);
 
     let user = &config.server.user;
     let host = resolve_host_ip(config);
@@ -764,6 +839,43 @@ fn main() -> Result<()> {
         }
         Commands::Run { target } => {
             run_remote_target(&config, &target)?;
+        }
+        Commands::Mounts { action } => {
+            match action.unwrap_or(MountsAction::List) {
+                MountsAction::List => {
+                    mounts::show_mounts(&config);
+                }
+                MountsAction::Sync => {
+                    println!("Querying Samba configuration and Windows network drives...");
+                    let synced = mounts::sync_mount_table(&mut config)?;
+                    config.save(&config_path)?;
+                    println!("\nSuccessfully synchronized {} mount(s):", synced.len());
+                    for (drive, share, host_path) in synced {
+                        println!("  {:<6} <=> {:<16} <=> {}", drive, share, host_path);
+                    }
+                    println!("\nSaved updated mount table to {:?}", config_path);
+                }
+            }
+        }
+        Commands::Path { path, to_win, to_linux } => {
+            let is_windows = if to_win {
+                false
+            } else if to_linux {
+                true
+            } else {
+                path.len() >= 2 && path.chars().nth(1) == Some(':')
+            };
+
+            if is_windows {
+                let linux_p = mounts::path_to_linux(&config, &path)?;
+                println!("{}", linux_p);
+            } else {
+                let win_p = mounts::path_to_windows(&config, &path)?;
+                println!("{}", win_p);
+            }
+        }
+        Commands::Open { file, app } => {
+            open_remote_file(&config, &file, app.as_deref())?;
         }
         Commands::StopDaemon => {
             stop_remote_daemon(&config)?;

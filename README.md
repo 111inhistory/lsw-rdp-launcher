@@ -201,6 +201,41 @@ Configured Timeouts:
 
 ---
 
+## 📂 Cross-OS Mounts & Document Opening
+
+Seamlessly bridge host files with Windows guest applications (like Microsoft 365 Word/Excel) without copying files.
+
+### 1. View & Synchronize Mount Table
+Automatically correlates Linux Samba shares (`/etc/samba/smb-win11.conf`) with Windows mapped network drives (`Win32_LogicalDisk`):
+```bash
+rdp-launcher mounts sync    # Discover and save mount mappings
+rdp-launcher mounts         # View active mount table
+```
+
+### 2. Bidirectional Path Translation (`path`)
+Translate paths between Linux and Windows:
+```bash
+# Linux to Windows
+rdp-launcher path /data/daily_data/finance/q3.xlsx
+# Output: J:\finance\q3.xlsx
+
+# Windows to Linux
+rdp-launcher path 'J:\finance\q3.xlsx'
+# Output: /data/daily_data/finance/q3.xlsx
+```
+
+### 3. Open Linux Files in Windows RemoteApp (`open`)
+Open any Linux document directly in its associated Windows software:
+```bash
+# Opens directly in Microsoft 365 Excel
+rdp-launcher open /data/daily_data/finance/q3.xlsx
+
+# Or explicitly choose an application
+rdp-launcher open /home/skwj111/contract.docx --app word
+```
+
+---
+
 ## 🔗 Libvirt Hook Integration
 
 To hook `rdp-lifecycle` strictly to your VM's runtime, add the following to `/etc/libvirt/hooks/qemu`:

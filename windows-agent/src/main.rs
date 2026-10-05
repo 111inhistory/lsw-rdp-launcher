@@ -715,6 +715,28 @@ fn run_daemon() {
     }
 }
 
+fn split_cmd_and_params(cmd: &str) -> (String, Option<String>) {
+    let trimmed = cmd.trim();
+    if trimmed.starts_with('"') {
+        if let Some(end_quote) = trimmed[1..].find('"') {
+            let file = &trimmed[1..1 + end_quote];
+            let rest = trimmed[1 + end_quote + 1..].trim();
+            let params = if rest.is_empty() { None } else { Some(rest.to_string()) };
+            return (file.to_string(), params);
+        }
+    }
+    // If it starts with an unquoted executable ending with .exe followed by space
+    if let Some(space_idx) = trimmed.find(' ') {
+        let first = &trimmed[..space_idx];
+        if first.to_lowercase().ends_with(".exe") || first.to_lowercase().ends_with(".bat") || first.to_lowercase().ends_with(".cmd") {
+            let rest = trimmed[space_idx + 1..].trim();
+            let params = if rest.is_empty() { None } else { Some(rest.to_string()) };
+            return (first.to_string(), params);
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
 fn launch_application(cmd: &str) {
     unsafe {
         if cmd.contains('!') {
@@ -734,14 +756,19 @@ fn launch_application(cmd: &str) {
             return;
         }
 
-        let wide_cmd = to_wide(cmd);
+        let (target_file, params) = split_cmd_and_params(cmd);
+        let wide_file = to_wide(&target_file);
+        let wide_params = params.as_deref().map(to_wide);
         let open_verb = to_wide("open");
 
         let mut sei: SHELLEXECUTEINFOW = std::mem::zeroed();
         sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
         sei.fMask = SEE_MASK_DOENVSUBST | SEE_MASK_FLAG_NO_UI;
         sei.lpVerb = open_verb.as_ptr();
-        sei.lpFile = wide_cmd.as_ptr();
+        sei.lpFile = wide_file.as_ptr();
+        if let Some(ref p) = wide_params {
+            sei.lpParameters = p.as_ptr();
+        }
         sei.nShow = SW_SHOWNORMAL;
 
         ShellExecuteExW(&mut sei);

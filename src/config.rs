@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
@@ -13,6 +14,30 @@ pub struct Config {
     pub remoteapp: RemoteAppConfig,
     #[serde(default)]
     pub lifecycle: LifecycleConfig,
+    #[serde(default)]
+    pub mounts: HashMap<String, String>,
+    #[serde(default)]
+    pub samba: SambaConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SambaConfig {
+    pub config_path: Option<String>,
+}
+
+impl Default for SambaConfig {
+    fn default() -> Self {
+        let default_path = if Path::new("/etc/samba/smb-win11.conf").exists() {
+            Some("/etc/samba/smb-win11.conf".to_string())
+        } else if Path::new("/etc/samba/smb.conf").exists() {
+            Some("/etc/samba/smb.conf".to_string())
+        } else {
+            None
+        };
+        Self {
+            config_path: default_path,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +161,8 @@ impl Default for Config {
             freerdp: FreeRdpConfig::default(),
             remoteapp: RemoteAppConfig::default(),
             lifecycle: LifecycleConfig::default(),
+            mounts: HashMap::new(),
+            samba: SambaConfig::default(),
         }
     }
 }
@@ -263,6 +290,24 @@ impl Config {
                 old_val = self.lifecycle.virtio_mem_alias.clone();
                 self.lifecycle.virtio_mem_alias = val.to_string();
             }
+            "samba.config_path" | "samba_config" | "samba_conf" => {
+                old_val = self.samba.config_path.clone().unwrap_or_else(|| "none".to_string());
+                if val.eq_ignore_ascii_case("none") || val.eq_ignore_ascii_case("null") {
+                    self.samba.config_path = None;
+                } else {
+                    self.samba.config_path = Some(val.to_string());
+                }
+            }
+            _ if k.starts_with("mounts.") => {
+                let drive = k.strip_prefix("mounts.").unwrap().to_uppercase();
+                let drive_key = if drive.ends_with(':') { drive } else { format!("{}:", drive) };
+                old_val = self.mounts.get(&drive_key).cloned().unwrap_or_else(|| "none".to_string());
+                if val.eq_ignore_ascii_case("none") || val.eq_ignore_ascii_case("null") {
+                    self.mounts.remove(&drive_key);
+                } else {
+                    self.mounts.insert(drive_key, val.to_string());
+                }
+            }
             _ => {
                 anyhow::bail!("Unknown config key '{}'. Run 'rdp-launcher config list' to see all valid keys.", key);
             }
@@ -289,6 +334,12 @@ impl Config {
             "lifecycle.vm_name" | "vm_name" => self.lifecycle.vm_name.clone(),
             "lifecycle.reclaim_virtio_mem" | "reclaim_virtio_mem" => self.lifecycle.reclaim_virtio_mem.to_string(),
             "lifecycle.virtio_mem_alias" | "virtio_mem_alias" => self.lifecycle.virtio_mem_alias.clone(),
+            "samba.config_path" | "samba_config" | "samba_conf" => self.samba.config_path.as_deref().unwrap_or("none").to_string(),
+            _ if k.starts_with("mounts.") => {
+                let drive = k.strip_prefix("mounts.").unwrap().to_uppercase();
+                let drive_key = if drive.ends_with(':') { drive } else { format!("{}:", drive) };
+                self.mounts.get(&drive_key).cloned().unwrap_or_else(|| "none".to_string())
+            }
             _ => {
                 anyhow::bail!("Unknown config key '{}'. Run 'rdp-launcher config list' to see all valid keys.", key);
             }
@@ -314,6 +365,7 @@ impl Config {
             ("lifecycle.vm_name", "string", self.lifecycle.vm_name.clone(), "Libvirt virtual machine domain name"),
             ("lifecycle.reclaim_virtio_mem", "bool", self.lifecycle.reclaim_virtio_mem.to_string(), "Reclaim virtio-mem before VM suspend"),
             ("lifecycle.virtio_mem_alias", "string", self.lifecycle.virtio_mem_alias.clone(), "Alias of virtio-mem device in libvirt XML"),
+            ("samba.config_path", "option<path>", self.samba.config_path.as_deref().unwrap_or("none").to_string(), "Path to Samba server smb.conf file"),
         ]
     }
 
