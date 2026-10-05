@@ -5,14 +5,65 @@ use anyhow::{bail, Context, Result};
 use crate::config::Config;
 use crate::is_freerdp_running;
 
-pub fn get_vm_state(vm_name: &str) -> Result<String> {
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum VmState {
+    Running,
+    Paused,
+    ShutOff,
+    PmSuspended,
+    Unknown,
+}
+
+impl std::fmt::Display for VmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VmState::Running => write!(f, "running"),
+            VmState::Paused => write!(f, "paused"),
+            VmState::ShutOff => write!(f, "shut off"),
+            VmState::PmSuspended => write!(f, "pmsuspended"),
+            VmState::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+impl VmState {
+    pub fn from_canonical_str(s: &str) -> Self {
+        let trimmed = s.trim().to_ascii_lowercase();
+        if trimmed.starts_with("running") {
+            VmState::Running
+        } else if trimmed.starts_with("paused") {
+            VmState::Paused
+        } else if trimmed.starts_with("shut off") {
+            VmState::ShutOff
+        } else if trimmed.starts_with("pmsuspended") {
+            VmState::PmSuspended
+        } else {
+            VmState::Unknown
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self, VmState::Running)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        matches!(self, VmState::Paused | VmState::PmSuspended)
+    }
+
+    pub fn is_shut_off(&self) -> bool {
+        matches!(self, VmState::ShutOff)
+    }
+}
+
+pub fn get_vm_state(vm_name: &str) -> Result<VmState> {
     let output = Command::new("virsh")
+        .env("LC_ALL", "C")
         .args(&["domstate", vm_name])
         .output()
         .context("Failed to execute virsh domstate")?;
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(text)
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(VmState::from_canonical_str(&text))
 }
 
 pub fn get_vm_ips(vm_name: &str) -> Vec<String> {
@@ -143,25 +194,26 @@ pub fn count_active_rdp_windows() -> Result<(usize, Vec<String>)> {
 
 pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
     let state = get_vm_state(vm_name)?;
-    let s = state.to_lowercase();
-    if s.contains("暂停") || s.contains("paused") || s.contains("suspended") {
+    if state.is_paused() {
         println!("[lifecycle] VM '{}' is currently paused/suspended. Resuming...", vm_name);
         let status = Command::new("virsh")
+            .env("LC_ALL", "C")
             .args(&["resume", vm_name])
             .status()
             .context("Failed to resume VM via virsh")?;
         if !status.success() {
-            anyhow::bail!("Failed to resume VM '{}'", vm_name);
+            bail!("Failed to resume VM '{}'", vm_name);
         }
         std::thread::sleep(Duration::from_millis(600));
-    } else if s.contains("关机") || s.contains("shut off") {
+    } else if state.is_shut_off() {
         println!("[lifecycle] VM '{}' is shut off. Starting...", vm_name);
         let status = Command::new("virsh")
+            .env("LC_ALL", "C")
             .args(&["start", vm_name])
             .status()
             .context("Failed to start VM via virsh")?;
         if !status.success() {
-            anyhow::bail!("Failed to start VM '{}'", vm_name);
+            bail!("Failed to start VM '{}'", vm_name);
         }
         println!("[lifecycle] Waiting for VM guest to initialize network...");
         std::thread::sleep(Duration::from_secs(5));
@@ -172,6 +224,7 @@ pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
 pub fn reclaim_virtio_mem(vm_name: &str, alias: &str) -> Result<()> {
     println!("[lifecycle] Reclaiming virtio-mem device '{}' memory back to host...", alias);
     let status = Command::new("virsh")
+        .env("LC_ALL", "C")
         .args(&[
             "update-memory-device",
             vm_name,
@@ -195,6 +248,7 @@ pub fn reclaim_virtio_mem(vm_name: &str, alias: &str) -> Result<()> {
 pub fn suspend_vm(vm_name: &str) -> Result<()> {
     println!("[lifecycle] Suspending VM '{}' to RAM...", vm_name);
     let status = Command::new("virsh")
+        .env("LC_ALL", "C")
         .args(&["suspend", vm_name])
         .status()
         .context("Failed to suspend VM via virsh")?;
@@ -228,25 +282,28 @@ pub fn run_watcher(config: Config) -> Result<()> {
             Err(_) => continue,
         };
 
-        let s_lower = vm_state.to_lowercase();
-        let is_running = s_lower.contains("运行") || s_lower.contains("running");
-
-        if !is_running {
+        if !vm_state.is_running() {
             rdp_idle_start = None;
             vm_idle_start = None;
             cached_ips.clear();
             continue;
         }
 
-        // 2. Refresh VM IPs periodically (every 30s) or if empty
-        if cached_ips.is_empty() || last_ip_fetch.elapsed() > Duration::from_secs(30) {
-            let fetched = get_vm_ips(vm_name);
-            if !fetched.is_empty() {
-                cached_ips = fetched;
-                last_ip_fetch = Instant::now();
+        // 2. Check active SSH sessions (Primary: Windows kernel via Agent TCP; Fallback: Host ss probe)
+        let resolved_host = crate::resolve_host_ip(&config);
+        let agent_client = crate::client::AgentClient::new(&resolved_host, config.server.agent_port);
+        let ssh_active = if let Ok(count) = agent_client.get_active_ssh_count() {
+            count > 0
+        } else {
+            if cached_ips.is_empty() || last_ip_fetch.elapsed() > Duration::from_secs(30) {
+                let fetched = get_vm_ips(vm_name);
+                if !fetched.is_empty() {
+                    cached_ips = fetched;
+                    last_ip_fetch = Instant::now();
+                }
             }
-        }
-        let ssh_active = has_active_ssh(&cached_ips, &config.server.host);
+            has_active_ssh(&cached_ips, &config.server.host)
+        };
 
         // 3. Check FreeRDP session & window count
         let freerdp_active = is_freerdp_running();
@@ -307,7 +364,9 @@ pub fn show_lifecycle_status(config: &Config) -> Result<()> {
     let vm_name = &config.lifecycle.vm_name;
     println!("=== RDP & VM Lifecycle Status ===");
 
-    let state = get_vm_state(vm_name).unwrap_or_else(|e| format!("Error: {}", e));
+    let state = get_vm_state(vm_name)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|e| format!("Error: {}", e));
     println!("VM Name:             {}", vm_name);
     println!("VM State:            {}", state);
 
@@ -318,8 +377,14 @@ pub fn show_lifecycle_status(config: &Config) -> Result<()> {
         println!("VM IP Addresses:     {}", ips.join(", "));
     }
 
-    let ssh_active = has_active_ssh(&ips, &config.server.host);
-    println!("Active SSH Sessions: {}", if ssh_active { "YES (Will prevent VM suspend)" } else { "None" });
+    let resolved_host = crate::resolve_host_ip(config);
+    let agent_client = crate::client::AgentClient::new(&resolved_host, config.server.agent_port);
+    let (ssh_active, ssh_source) = if let Ok(count) = agent_client.get_active_ssh_count() {
+        (count > 0, format!("Windows Agent (active: {})", count))
+    } else {
+        (has_active_ssh(&ips, &config.server.host), "Host Socket Probe (fallback)".to_string())
+    };
+    println!("Active SSH Sessions: {} [{}]", if ssh_active { "YES (Will prevent VM suspend)" } else { "None" }, ssh_source);
 
     let freerdp_active = is_freerdp_running();
     println!("FreeRDP Connection:  {}", if freerdp_active { "Connected" } else { "Disconnected" });

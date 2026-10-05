@@ -15,6 +15,8 @@ const TCP_TIMEOUT: Duration = Duration::from_secs(3);
 enum AgentRequest<'a> {
     #[serde(rename = "ping")]
     Ping,
+    #[serde(rename = "status")]
+    Status,
     #[serde(rename = "run")]
     Run {
         target: &'a str,
@@ -25,6 +27,8 @@ enum AgentRequest<'a> {
     Open { file: &'a str },
     #[serde(rename = "list_apps")]
     ListApps { with_icons: bool },
+    #[serde(rename = "get_mapped_drives")]
+    GetMappedDrives,
     #[serde(rename = "quit")]
     Quit,
 }
@@ -36,6 +40,10 @@ struct AgentResponse {
     message: Option<String>,
     #[serde(default)]
     apps: Option<Vec<RemoteAppInfo>>,
+    #[serde(default)]
+    active_ssh_count: Option<usize>,
+    #[serde(default)]
+    drives: Option<Vec<(String, String)>>,
 }
 
 pub struct AgentClient {
@@ -96,6 +104,16 @@ impl AgentClient {
     pub fn ping(&self) -> Result<()> {
         let _ = self.send_request(&AgentRequest::Ping, Duration::from_secs(2))?;
         Ok(())
+    }
+
+    pub fn get_active_ssh_count(&self) -> Result<usize> {
+        let resp = self.send_request(&AgentRequest::Status, Duration::from_secs(2))?;
+        Ok(resp.active_ssh_count.unwrap_or(0))
+    }
+
+    pub fn get_mapped_drives(&self) -> Result<Vec<(String, String)>> {
+        let resp = self.send_request(&AgentRequest::GetMappedDrives, Duration::from_secs(5))?;
+        Ok(resp.drives.unwrap_or_default())
     }
 
     pub fn open_file(&self, win_path: &str) -> Result<()> {

@@ -1,19 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 
 use crate::config::Config;
-
-#[derive(Deserialize, Debug)]
-struct WinLogicalDisk {
-    #[serde(rename = "DeviceID")]
-    pub device_id: String,
-    #[serde(rename = "ProviderName")]
-    pub provider_name: Option<String>,
-}
 
 /// Parses Samba configuration file (INI format) to extract share name -> host path mappings
 pub fn parse_samba_shares(conf_path: &Path) -> Result<HashMap<String, String>> {
@@ -57,45 +47,6 @@ pub fn parse_samba_shares(conf_path: &Path) -> Result<HashMap<String, String>> {
     Ok(shares)
 }
 
-/// Queries Windows guest mapped network drives (DriveType=4) via WMI / PowerShell
-pub fn query_windows_mapped_drives(user: &str, host: &str) -> Result<Vec<(String, String)>> {
-    let ps_cmd = "Get-CimInstance Win32_LogicalDisk | Where-Object DriveType -eq 4 | Select-Object DeviceID, ProviderName | ConvertTo-Json -Compress";
-
-    let output = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), ps_cmd.to_string()])
-        .output()
-        .context("Failed to execute SSH command to query Windows network drives")?;
-
-    if !output.status.success() {
-        bail!("Failed to query Windows mapped drives: {}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    let stdout_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout_str.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut results = Vec::new();
-    // PowerShell ConvertTo-Json returns either an array `[...]` or a single object `{...}`
-    if stdout_str.starts_with('[') {
-        let disks: Vec<WinLogicalDisk> = serde_json::from_str(&stdout_str)
-            .context("Failed to parse Windows mapped drives JSON array")?;
-        for d in disks {
-            if let Some(prov) = d.provider_name {
-                results.push((d.device_id, prov));
-            }
-        }
-    } else if stdout_str.starts_with('{') {
-        let disk: WinLogicalDisk = serde_json::from_str(&stdout_str)
-            .context("Failed to parse Windows mapped drive JSON object")?;
-        if let Some(prov) = disk.provider_name {
-            results.push((disk.device_id, prov));
-        }
-    }
-
-    Ok(results)
-}
-
 /// Synchronizes the mount table by correlating Samba shares with Windows mapped drives
 pub fn sync_mount_table(config: &mut Config) -> Result<Vec<(String, String, String)>> {
     let conf_path_str = config.samba.config_path.as_deref().unwrap_or("/etc/samba/smb-win11.conf");
@@ -104,9 +55,9 @@ pub fn sync_mount_table(config: &mut Config) -> Result<Vec<(String, String, Stri
     let shares = parse_samba_shares(conf_path)
         .with_context(|| format!("Failed to parse Samba configuration from {:?}", conf_path))?;
 
-    let user = &config.server.user;
-    let host = crate::resolve_host_ip(config);
-    let win_drives = query_windows_mapped_drives(user, &host)?;
+    // Query Windows network drives directly via TCP Agent (Zero SSH, sub-millisecond)
+    let client = crate::client::get_or_ensure_client(config)?;
+    let win_drives = client.get_mapped_drives()?;
 
     let mut synced = Vec::new();
 

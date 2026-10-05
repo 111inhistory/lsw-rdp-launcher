@@ -20,10 +20,8 @@ Linux Host Directory           Samba Share               Windows Guest
 Running `rdp-launcher mounts sync`:
 1. Reads `/etc/samba/smb-win11.conf` (world-readable, permissions `0644`).
 2. Extracts share sections (`[games]`, `[daily_data]`, etc.) and their `path = ...` directives.
-3. Queries Windows guest network drives via SSH using WMI:
-   ```powershell
-   Get-CimInstance Win32_LogicalDisk | Where-Object DriveType -eq 4 | Select-Object DeviceID, ProviderName
-   ```
+3. Queries Windows guest network drives directly via TCP using native Win32 API (`WNetGetConnectionW` from `mpr.dll`):
+   - Zero SSH overhead, zero PowerShell, sub-millisecond query time.
 4. Correlates UNC paths (e.g. `\\192.168.122.1\games`) with Samba shares to produce the mapping table:
    - `F:\` <=> `/data/games`
    - `J:\` <=> `/data/daily_data`

@@ -62,16 +62,15 @@ The host launcher acts as the orchestrator, lifecycle supervisor, and desktop in
 - **Security**: Injects credentials from Linux Secret Service (Keyring) into FreeRDP via stdin (`/from-stdin:force`). Zero plaintext passwords on disk or command lines.
 
 ### Windows Guest (`remoteapp-launcher.exe`)
-The guest launcher operates as a dual-role executable:
+The guest launcher operates as a high-performance daemon and service provider:
 1. **Daemon Role (`remoteapp-launcher.exe daemon`)**:
    - Launched by FreeRDP as the primary `/app:program` RAIL application.
    - Sits in the system tray, preventing screen lock or sleep via `SetThreadExecutionState` and periodic keep-alive events.
-   - Listens on named pipe `\\.\pipe\remoteapp_launcher`.
-   - **FIFO Task Queue**: Manages an internal sequential channel (`mpsc`). When multiple open or run requests arrive, they are dispatched strictly in order to prevent Windows process contention.
+   - Enforces single-instance execution via Win32 mutex `Local\RemoteAppLauncher_Singleton_Mutex`.
+   - Listens on TCP port `49152` for direct, low-latency JSON RPC commands from the Linux host (`open`, `run`, `list_apps`, `get_mapped_drives`, `status`, `ping`).
+   - Queries Windows kernel via `iphlpapi.dll` (`GetExtendedTcpTable`) to report authoritative active SSH sessions on port 22.
+   - Queries `kernel32` and `mpr.dll` (`WNetGetConnectionW`) to report mapped network drives directly.
    - Calls `ShellExecuteExW` within the interactive user session (Session 2), ensuring applications have full GUI desktop access.
-2. **CLI Client Role (`remoteapp-launcher.exe run <target>`)**:
-   - Invoked over SSH by the Linux host.
-   - Connects to the daemon's local named pipe, delivers the launch request, and exits immediately.
 3. **Application Scanner Role (`remoteapp-launcher.exe list-apps --with-icons`)**:
    - Scans Start Menu (`.lnk`), Desktop (`.lnk` deduplicated against Start Menu), and UWP/MSIX apps (`shell:AppsFolder`).
    - Extracts native 256x256 icons using `PrivateExtractIconsW` and encodes them as PNG Base64.

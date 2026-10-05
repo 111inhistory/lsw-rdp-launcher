@@ -44,6 +44,8 @@ extern "system" {
     fn GlobalUnlock(hMem: HGLOBAL) -> BOOL;
     fn GlobalSize(hMem: HGLOBAL) -> usize;
     fn CreateMutexW(lpMutexAttributes: *mut std::ffi::c_void, bInitialOwner: BOOL, lpName: *const u16) -> HANDLE;
+    fn GetLogicalDrives() -> u32;
+    fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
     fn CreateNamedPipeW(
         lpName: *const u16,
         dwOpenMode: u32,
@@ -63,6 +65,37 @@ extern "system" {
         lpNumberOfBytesRead: *mut u32,
         lpOverlapped: *mut std::ffi::c_void,
     ) -> BOOL;
+}
+
+#[link(name = "mpr")]
+extern "system" {
+    fn WNetGetConnectionW(lpLocalName: *const u16, lpRemoteName: *mut u16, lpnLength: *mut u32) -> u32;
+}
+
+fn query_mapped_network_drives() -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    unsafe {
+        let mask = GetLogicalDrives();
+        for i in 0..26 {
+            if (mask & (1 << i)) != 0 {
+                let letter = (b'A' + i as u8) as char;
+                let root_str = format!("{}:\\", letter);
+                let wide_root = to_wide(&root_str);
+                // 4 = DRIVE_REMOTE
+                if GetDriveTypeW(wide_root.as_ptr()) == 4 {
+                    let drive_name = format!("{}:", letter);
+                    let wide_drive = to_wide(&drive_name);
+                    let mut buf = [0u16; 512];
+                    let mut len = 512u32;
+                    if WNetGetConnectionW(wide_drive.as_ptr(), buf.as_mut_ptr(), &mut len) == 0 {
+                        let unc = from_wide(&buf);
+                        results.push((drive_name, unc));
+                    }
+                }
+            }
+        }
+    }
+    results
 }
 
 #[repr(C)]
@@ -602,6 +635,81 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct MIB_TCPROW_OWNER_PID {
+    pub dwState: u32,
+    pub dwLocalAddr: u32,
+    pub dwLocalPort: u32,
+    pub dwRemoteAddr: u32,
+    pub dwRemotePort: u32,
+    pub dwOwningPid: u32,
+}
+
+#[repr(C)]
+struct MIB_TCPTABLE_OWNER_PID {
+    pub dwNumEntries: u32,
+    pub table: [MIB_TCPROW_OWNER_PID; 1],
+}
+
+#[link(name = "iphlpapi")]
+extern "system" {
+    fn GetExtendedTcpTable(
+        pTcpTable: *mut std::ffi::c_void,
+        pdwSize: *mut u32,
+        bOrder: BOOL,
+        ulAf: u32,
+        TableClass: u32,
+        Reserved: u32,
+    ) -> u32;
+}
+
+fn count_active_ssh_connections() -> usize {
+    let mut count = 0;
+    unsafe {
+        // 1. Query IPv4 TCP Table (AF_INET = 2, TCP_TABLE_OWNER_PID_ALL = 5)
+        let mut size = 0u32;
+        let _ = GetExtendedTcpTable(ptr::null_mut(), &mut size, 0, 2, 5, 0);
+        if size > 0 {
+            let mut buf: Vec<u8> = vec![0; size as usize];
+            if GetExtendedTcpTable(buf.as_mut_ptr() as *mut _, &mut size, 0, 2, 5, 0) == 0 {
+                let p_table = buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
+                let num_entries = (*p_table).dwNumEntries as usize;
+                let p_rows = buf.as_ptr().add(std::mem::size_of::<u32>()) as *const MIB_TCPROW_OWNER_PID;
+                for i in 0..num_entries {
+                    let row = *p_rows.add(i);
+                    let local_port = u16::from_be((row.dwLocalPort & 0xFFFF) as u16);
+                    if local_port == 22 && row.dwState == 5 /* MIB_TCP_STATE_ESTAB */ {
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        // 2. Query IPv6 TCP Table (AF_INET6 = 23, TCP_TABLE_OWNER_PID_ALL = 5)
+        let mut size_v6 = 0u32;
+        let _ = GetExtendedTcpTable(ptr::null_mut(), &mut size_v6, 0, 23, 5, 0);
+        if size_v6 > 0 {
+            let mut buf_v6: Vec<u8> = vec![0; size_v6 as usize];
+            if GetExtendedTcpTable(buf_v6.as_mut_ptr() as *mut _, &mut size_v6, 0, 23, 5, 0) == 0 {
+                let num_entries = *(buf_v6.as_ptr() as *const u32) as usize;
+                let row_offset = std::mem::size_of::<u32>();
+                let row_size = 56usize; // 16 local + 4 scope + 4 port + 16 remote + 4 scope + 4 port + 4 state + 4 pid
+                for i in 0..num_entries {
+                    let ptr = buf_v6.as_ptr().add(row_offset + i * row_size);
+                    let local_port_raw = *(ptr.add(20) as *const u32);
+                    let state = *(ptr.add(48) as *const u32);
+                    let local_port = u16::from_be((local_port_raw & 0xFFFF) as u16);
+                    if local_port == 22 && state == 5 {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
 const DEFAULT_TCP_PORT: u16 = 49152;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -609,6 +717,8 @@ const DEFAULT_TCP_PORT: u16 = 49152;
 pub enum AgentRequest {
     #[serde(rename = "ping")]
     Ping,
+    #[serde(rename = "status")]
+    Status,
     #[serde(rename = "run")]
     Run { target: String, params: Option<String> },
     #[serde(rename = "open")]
@@ -618,6 +728,8 @@ pub enum AgentRequest {
         #[serde(default)]
         with_icons: bool,
     },
+    #[serde(rename = "get_mapped_drives")]
+    GetMappedDrives,
     #[serde(rename = "quit")]
     Quit,
 }
@@ -629,6 +741,10 @@ pub struct AgentResponse {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apps: Option<Vec<AppInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_ssh_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drives: Option<Vec<(String, String)>>,
 }
 
 fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
@@ -643,17 +759,24 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
     if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
         let req_res: Result<AgentRequest, _> = serde_json::from_str(line.trim());
         let response = match req_res {
-            Ok(AgentRequest::Ping) => AgentResponse {
-                status: "ok".to_string(),
-                message: Some("pong".to_string()),
-                apps: None,
-            },
+            Ok(AgentRequest::Ping) | Ok(AgentRequest::Status) => {
+                let ssh_count = count_active_ssh_connections();
+                AgentResponse {
+                    status: "ok".to_string(),
+                    message: Some("pong".to_string()),
+                    apps: None,
+                    active_ssh_count: Some(ssh_count),
+                    drives: None,
+                }
+            }
             Ok(AgentRequest::Run { target, params }) => {
                 launch_application(&target, params.as_deref());
                 AgentResponse {
                     status: "ok".to_string(),
                     message: None,
                     apps: None,
+                    active_ssh_count: None,
+                    drives: None,
                 }
             }
             Ok(AgentRequest::Open { file }) => {
@@ -662,6 +785,8 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
                     status: "ok".to_string(),
                     message: None,
                     apps: None,
+                    active_ssh_count: None,
+                    drives: None,
                 }
             }
             Ok(AgentRequest::ListApps { with_icons }) => {
@@ -670,6 +795,18 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
                     status: "ok".to_string(),
                     message: None,
                     apps: Some(apps),
+                    active_ssh_count: None,
+                    drives: None,
+                }
+            }
+            Ok(AgentRequest::GetMappedDrives) => {
+                let drives = query_mapped_network_drives();
+                AgentResponse {
+                    status: "ok".to_string(),
+                    message: None,
+                    apps: None,
+                    active_ssh_count: None,
+                    drives: Some(drives),
                 }
             }
             Ok(AgentRequest::Quit) => {
@@ -680,12 +817,16 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
                     status: "ok".to_string(),
                     message: Some("quitting".to_string()),
                     apps: None,
+                    active_ssh_count: None,
+                    drives: None,
                 }
             }
             Err(e) => AgentResponse {
                 status: "error".to_string(),
                 message: Some(format!("Invalid request: {}", e)),
                 apps: None,
+                active_ssh_count: None,
+                drives: None,
             },
         };
 
@@ -968,6 +1109,11 @@ fn main() {
             if let Ok(json) = serde_json::to_string_pretty(&apps) {
                 print_to_stdout(&json); print_to_stdout("\r\n");
             }
+        }
+        "check-ssh" => {
+            let count = count_active_ssh_connections();
+            print_to_stdout(&format!("Active SSH connections: {}\r\n", count));
+            std::process::exit(0);
         }
         "ping" => {
             if send_pipe_command("PING") {
