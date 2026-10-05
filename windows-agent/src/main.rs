@@ -7,13 +7,28 @@ use std::fs;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::result::Result::Ok;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use windows_sys::core::{GUID, HRESULT};
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::GdiPlus::*;
+use windows_sys::Win32::NetworkManagement::IpHelper::*;
+use windows_sys::Win32::NetworkManagement::WNet::*;
+use windows_sys::Win32::Networking::WinSock::*;
+use windows_sys::Win32::Security::Cryptography::*;
+use windows_sys::Win32::Storage::FileSystem::*;
+use windows_sys::Win32::System::Com::StructuredStorage::*;
 use windows_sys::Win32::System::Com::*;
+use windows_sys::Win32::System::Console::*;
+use windows_sys::Win32::System::LibraryLoader::*;
+use windows_sys::Win32::System::Memory::*;
+use windows_sys::Win32::System::Pipes::*;
 use windows_sys::Win32::System::Power::*;
+use windows_sys::Win32::System::Threading::*;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -30,47 +45,7 @@ pub struct AppInfo {
     pub icon_base64: Option<String>,
 }
 
-const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
-
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetStdHandle(nStdHandle: u32) -> HANDLE;
-    fn WriteFile(hFile: HANDLE, lpBuffer: *const u8, nNumberOfBytesToWrite: u32, lpNumberOfBytesWritten: *mut u32, lpOverlapped: *mut std::ffi::c_void) -> BOOL;
-    fn AttachConsole(dwProcessId: u32) -> BOOL;
-    fn GetConsoleWindow() -> HWND;
-    fn SetConsoleOutputCP(wCodePageID: u32) -> BOOL;
-    fn GetModuleHandleW(lpModuleName: *const u16) -> HMODULE;
-    fn GlobalLock(hMem: HGLOBAL) -> *mut std::ffi::c_void;
-    fn GlobalUnlock(hMem: HGLOBAL) -> BOOL;
-    fn GlobalSize(hMem: HGLOBAL) -> usize;
-    fn CreateMutexW(lpMutexAttributes: *mut std::ffi::c_void, bInitialOwner: BOOL, lpName: *const u16) -> HANDLE;
-    fn GetLogicalDrives() -> u32;
-    fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
-    fn CreateNamedPipeW(
-        lpName: *const u16,
-        dwOpenMode: u32,
-        dwPipeMode: u32,
-        nMaxInstances: u32,
-        nOutBufferSize: u32,
-        nInBufferSize: u32,
-        nDefaultTimeOut: u32,
-        lpSecurityAttributes: *mut std::ffi::c_void,
-    ) -> HANDLE;
-    fn ConnectNamedPipe(hNamedPipe: HANDLE, lpOverlapped: *mut std::ffi::c_void) -> BOOL;
-    fn DisconnectNamedPipe(hNamedPipe: HANDLE) -> BOOL;
-    fn ReadFile(
-        hFile: HANDLE,
-        lpBuffer: *mut u8,
-        nNumberOfBytesToRead: u32,
-        lpNumberOfBytesRead: *mut u32,
-        lpOverlapped: *mut std::ffi::c_void,
-    ) -> BOOL;
-}
-
-#[link(name = "mpr")]
-extern "system" {
-    fn WNetGetConnectionW(lpLocalName: *const u16, lpRemoteName: *mut u16, lpnLength: *mut u32) -> u32;
-}
+const DRIVE_REMOTE: u32 = 4;
 
 fn query_mapped_network_drives() -> Vec<(String, String)> {
     let mut results = Vec::new();
@@ -81,13 +56,12 @@ fn query_mapped_network_drives() -> Vec<(String, String)> {
                 let letter = (b'A' + i as u8) as char;
                 let root_str = format!("{}:\\", letter);
                 let wide_root = to_wide(&root_str);
-                // 4 = DRIVE_REMOTE
-                if GetDriveTypeW(wide_root.as_ptr()) == 4 {
+                if GetDriveTypeW(wide_root.as_ptr()) == DRIVE_REMOTE {
                     let drive_name = format!("{}:", letter);
                     let wide_drive = to_wide(&drive_name);
                     let mut buf = [0u16; 512];
                     let mut len = 512u32;
-                    if WNetGetConnectionW(wide_drive.as_ptr(), buf.as_mut_ptr(), &mut len) == 0 {
+                    if WNetGetConnectionW(wide_drive.as_ptr(), buf.as_mut_ptr(), &mut len) == NO_ERROR {
                         let unc = from_wide(&buf);
                         results.push((drive_name, unc));
                     }
@@ -96,101 +70,6 @@ fn query_mapped_network_drives() -> Vec<(String, String)> {
         }
     }
     results
-}
-
-#[repr(C)]
-struct SHELLEXECUTEINFOW {
-    pub cbSize: u32,
-    pub fMask: u32,
-    pub hwnd: HWND,
-    pub lpVerb: *const u16,
-    pub lpFile: *const u16,
-    pub lpParameters: *const u16,
-    pub lpDirectory: *const u16,
-    pub nShow: i32,
-    pub hInstApp: HINSTANCE,
-    pub lpIDList: *mut std::ffi::c_void,
-    pub lpClass: *const u16,
-    pub hkeyClass: isize,
-    pub dwHotKey: u32,
-    pub hIconOrMonitor: HANDLE,
-    pub hProcess: HANDLE,
-}
-
-#[repr(C)]
-struct NOTIFYICONDATAW {
-    pub cbSize: u32,
-    pub hWnd: HWND,
-    pub uID: u32,
-    pub uFlags: u32,
-    pub uCallbackMessage: u32,
-    pub hIcon: HICON,
-    pub szTip: [u16; 128],
-    pub dwState: u32,
-    pub dwStateMask: u32,
-    pub szInfo: [u16; 256],
-    pub uTimeoutOrVersion: u32,
-    pub szInfoTitle: [u16; 64],
-    pub dwInfoFlags: u32,
-    pub guidItem: GUID,
-    pub hBalloonIcon: HICON,
-}
-
-const NIM_ADD: u32 = 0;
-const NIM_DELETE: u32 = 2;
-const NIF_MESSAGE: u32 = 0x00000001;
-const NIF_ICON: u32 = 0x00000002;
-const NIF_TIP: u32 = 0x00000004;
-
-#[link(name = "shell32")]
-extern "system" {
-    fn ShellExecuteExW(pExecInfo: *mut SHELLEXECUTEINFOW) -> BOOL;
-    fn Shell_NotifyIconW(dwMessage: u32, lpData: *const NOTIFYICONDATAW) -> BOOL;
-}
-
-#[link(name = "user32")]
-extern "system" {
-    fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
-    fn PrivateExtractIconsW(
-        szFileName: *const u16,
-        nIconIndex: i32,
-        cxIcon: i32,
-        cyIcon: i32,
-        phicon: *mut HICON,
-        piconid: *mut u32,
-        nIcons: u32,
-        flags: u32,
-    ) -> u32;
-    fn DestroyIcon(hIcon: HICON) -> BOOL;
-    fn keybd_event(bVk: u8, bScan: u8, dwFlags: u32, dwExtraInfo: usize);
-}
-
-#[link(name = "gdiplus")]
-extern "system" {
-    fn GdiplusStartup(token: *mut usize, input: *const GdiplusStartupInput, output: *mut std::ffi::c_void) -> i32;
-    fn GdiplusShutdown(token: usize);
-    fn GdipCreateBitmapFromHICON(hicon: HICON, bitmap: *mut *mut std::ffi::c_void) -> i32;
-    fn GdipSaveImageToStream(image: *mut std::ffi::c_void, stream: *mut std::ffi::c_void, clsidEncoder: *const GUID, encoderParams: *const std::ffi::c_void) -> i32;
-    fn GdipDisposeImage(image: *mut std::ffi::c_void) -> i32;
-}
-
-#[repr(C)]
-struct GdiplusStartupInput {
-    version: u32,
-    debug_event_callback: usize,
-    suppress_background_thread: BOOL,
-    suppress_external_codecs: BOOL,
-}
-
-#[link(name = "ole32")]
-extern "system" {
-    fn CreateStreamOnHGlobal(hGlobal: HGLOBAL, fDeleteOnRelease: BOOL, ppstm: *mut *mut std::ffi::c_void) -> i32;
-    fn GetHGlobalFromStream(pstm: *mut std::ffi::c_void, phglobal: *mut HGLOBAL) -> i32;
-}
-
-#[link(name = "crypt32")]
-extern "system" {
-    fn CryptBinaryToStringA(pbBinary: *const u8, cbBinary: u32, dwFlags: u32, pszString: *mut u8, pcchString: *mut u32) -> BOOL;
 }
 
 const CLSID_PNG: GUID = GUID {
@@ -294,7 +173,7 @@ fn extract_icon_base64_png(exe_path: &str, size: i32) -> Option<String> {
             return None;
         }
 
-        let mut gp_bitmap: *mut std::ffi::c_void = ptr::null_mut();
+        let mut gp_bitmap: *mut GpBitmap = ptr::null_mut();
         if GdipCreateBitmapFromHICON(hicon, &mut gp_bitmap) != 0 {
             DestroyIcon(hicon);
             return None;
@@ -302,13 +181,13 @@ fn extract_icon_base64_png(exe_path: &str, size: i32) -> Option<String> {
 
         let mut stream: *mut std::ffi::c_void = ptr::null_mut();
         if CreateStreamOnHGlobal(ptr::null_mut(), 1, &mut stream) != 0 {
-            GdipDisposeImage(gp_bitmap);
+            GdipDisposeImage(gp_bitmap as *mut _);
             DestroyIcon(hicon);
             return None;
         }
 
-        let status = GdipSaveImageToStream(gp_bitmap, stream, &CLSID_PNG, ptr::null());
-        GdipDisposeImage(gp_bitmap);
+        let status = GdipSaveImageToStream(gp_bitmap as *mut _, stream as *mut _, &CLSID_PNG, ptr::null());
+        GdipDisposeImage(gp_bitmap as *mut _);
         DestroyIcon(hicon);
 
         if status != 0 {
@@ -416,12 +295,8 @@ fn scan_shortcuts(with_icons: bool) -> Vec<AppInfo> {
         CoInitialize(ptr::null());
         let mut gdi_token: usize = 0;
         if with_icons {
-            let input = GdiplusStartupInput {
-                version: 1,
-                debug_event_callback: 0,
-                suppress_background_thread: 0,
-                suppress_external_codecs: 0,
-            };
+            let mut input: GdiplusStartupInput = std::mem::zeroed();
+            input.GdiplusVersion = 1;
             GdiplusStartup(&mut gdi_token, &input, ptr::null_mut());
         }
 
@@ -635,51 +510,24 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct MIB_TCPROW_OWNER_PID {
-    pub dwState: u32,
-    pub dwLocalAddr: u32,
-    pub dwLocalPort: u32,
-    pub dwRemoteAddr: u32,
-    pub dwRemotePort: u32,
-    pub dwOwningPid: u32,
-}
-
-#[repr(C)]
-struct MIB_TCPTABLE_OWNER_PID {
-    pub dwNumEntries: u32,
-    pub table: [MIB_TCPROW_OWNER_PID; 1],
-}
-
-#[link(name = "iphlpapi")]
-extern "system" {
-    fn GetExtendedTcpTable(
-        pTcpTable: *mut std::ffi::c_void,
-        pdwSize: *mut u32,
-        bOrder: BOOL,
-        ulAf: u32,
-        TableClass: u32,
-        Reserved: u32,
-    ) -> u32;
-}
-
-fn count_active_ssh_connections() -> usize {
+fn count_active_ssh_connections() -> Option<usize> {
     let mut count = 0;
+    let mut any_table_succeeded = false;
     unsafe {
         // 1. Query IPv4 TCP Table (AF_INET = 2, TCP_TABLE_OWNER_PID_ALL = 5)
         let mut size = 0u32;
-        let _ = GetExtendedTcpTable(ptr::null_mut(), &mut size, 0, 2, 5, 0);
+        let _ = GetExtendedTcpTable(ptr::null_mut(), &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0);
         if size > 0 {
             let mut buf: Vec<u8> = vec![0; size as usize];
-            if GetExtendedTcpTable(buf.as_mut_ptr() as *mut _, &mut size, 0, 2, 5, 0) == 0 {
+            if GetExtendedTcpTable(buf.as_mut_ptr() as *mut _, &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR {
+                any_table_succeeded = true;
                 let p_table = buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
                 let num_entries = (*p_table).dwNumEntries as usize;
                 let p_rows = buf.as_ptr().add(std::mem::size_of::<u32>()) as *const MIB_TCPROW_OWNER_PID;
                 for i in 0..num_entries {
                     let row = *p_rows.add(i);
                     let local_port = u16::from_be((row.dwLocalPort & 0xFFFF) as u16);
-                    if local_port == 22 && row.dwState == 5 /* MIB_TCP_STATE_ESTAB */ {
+                    if local_port == 22 && row.dwState == MIB_TCP_STATE_ESTAB as u32 {
                         count += 1;
                     }
                 }
@@ -688,10 +536,11 @@ fn count_active_ssh_connections() -> usize {
 
         // 2. Query IPv6 TCP Table (AF_INET6 = 23, TCP_TABLE_OWNER_PID_ALL = 5)
         let mut size_v6 = 0u32;
-        let _ = GetExtendedTcpTable(ptr::null_mut(), &mut size_v6, 0, 23, 5, 0);
+        let _ = GetExtendedTcpTable(ptr::null_mut(), &mut size_v6, 0, AF_INET6 as u32, TCP_TABLE_OWNER_PID_ALL, 0);
         if size_v6 > 0 {
             let mut buf_v6: Vec<u8> = vec![0; size_v6 as usize];
-            if GetExtendedTcpTable(buf_v6.as_mut_ptr() as *mut _, &mut size_v6, 0, 23, 5, 0) == 0 {
+            if GetExtendedTcpTable(buf_v6.as_mut_ptr() as *mut _, &mut size_v6, 0, AF_INET6 as u32, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR {
+                any_table_succeeded = true;
                 let num_entries = *(buf_v6.as_ptr() as *const u32) as usize;
                 let row_offset = std::mem::size_of::<u32>();
                 let row_size = 56usize; // 16 local + 4 scope + 4 port + 16 remote + 4 scope + 4 port + 4 state + 4 pid
@@ -700,14 +549,32 @@ fn count_active_ssh_connections() -> usize {
                     let local_port_raw = *(ptr.add(20) as *const u32);
                     let state = *(ptr.add(48) as *const u32);
                     let local_port = u16::from_be((local_port_raw & 0xFFFF) as u16);
-                    if local_port == 22 && state == 5 {
+                    if local_port == 22 && state == MIB_TCP_STATE_ESTAB as u32 {
                         count += 1;
                     }
                 }
             }
         }
     }
-    count
+
+    if any_table_succeeded {
+        Some(count)
+    } else {
+        None
+    }
+}
+
+fn get_internal_bind_ip() -> std::net::IpAddr {
+    // Determine the local IP assigned on the interface facing the Linux host gateway (192.168.122.1)
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("192.168.122.1:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip();
+            }
+        }
+    }
+    // Fallback: explicitly bind to 192.168.122.14 (the host-only / NAT adapter)
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 122, 14))
 }
 
 const DEFAULT_TCP_PORT: u16 = 49152;
@@ -765,7 +632,7 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
                     status: "ok".to_string(),
                     message: Some("pong".to_string()),
                     apps: None,
-                    active_ssh_count: Some(ssh_count),
+                    active_ssh_count: ssh_count,
                     drives: None,
                 }
             }
@@ -901,11 +768,13 @@ fn run_daemon() {
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
         SetTimer(hwnd, TIMER_KEEPALIVE_ID, 60_000, None);
 
-        // TCP server listener thread (Port 49152) for direct low-latency commands from Linux host
+        // TCP server listener thread restricted specifically to host-only / NAT adapter
         let hwnd_for_tcp = hwnd as usize;
         std::thread::spawn(move || {
-            let addr = format!("0.0.0.0:{}", DEFAULT_TCP_PORT);
+            let bind_ip = get_internal_bind_ip();
+            let addr = format!("{}:{}", bind_ip, DEFAULT_TCP_PORT);
             if let Ok(listener) = std::net::TcpListener::bind(&addr) {
+                println!("TCP Agent listening on {} (host-only adapter)", addr);
                 for stream in listener.incoming() {
                     if !RUNNING.load(Ordering::SeqCst) {
                         break;
@@ -1111,8 +980,11 @@ fn main() {
             }
         }
         "check-ssh" => {
-            let count = count_active_ssh_connections();
-            print_to_stdout(&format!("Active SSH connections: {}\r\n", count));
+            if let Some(count) = count_active_ssh_connections() {
+                print_to_stdout(&format!("Active SSH connections: {}\r\n", count));
+            } else {
+                print_to_stdout("Failed to query active SSH connections\r\n");
+            }
             std::process::exit(0);
         }
         "ping" => {
