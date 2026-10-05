@@ -685,34 +685,16 @@ fn resolve_app_target(target: &str) -> String {
 }
 
 pub fn sanitize_file_path(input: &str) -> String {
-    let mut s = input.trim();
-    if let Some(stripped) = s.strip_prefix("file://localhost") {
-        s = stripped;
-    } else if let Some(stripped) = s.strip_prefix("file://") {
-        s = stripped;
-    }
-    percent_decode(s)
-}
-
-fn percent_decode(s: &str) -> String {
-    let mut bytes = Vec::new();
-    let input = s.as_bytes();
-    let mut i = 0;
-    while i < input.len() {
-        if input[i] == b'%' && i + 2 < input.len() {
-            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&input[i+1..i+3]).unwrap_or(""), 16) {
-                bytes.push(byte);
-                i += 3;
-                continue;
+    let trimmed = input.trim();
+    if trimmed.starts_with("file://") {
+        if let Ok(parsed_url) = url::Url::parse(trimmed) {
+            if let Ok(file_path) = parsed_url.to_file_path() {
+                return file_path.to_string_lossy().to_string();
             }
         }
-        bytes.push(input[i]);
-        i += 1;
     }
-    String::from_utf8_lossy(&bytes).to_string()
+    trimmed.to_string()
 }
-
-const BLANK_XLSX_TEMPLATE: &[u8] = include_bytes!("blank_template.xlsx");
 
 fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) -> Result<()> {
     if file_paths.is_empty() {
@@ -729,16 +711,6 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
         let p = std::path::Path::new(&clean_path);
         if !p.exists() {
             bail!("File '{}' does not exist on host (decoded from '{}').", clean_path, f);
-        }
-
-        // If it's a 0-byte newly created Excel file, initialize it with a standard blank workbook template
-        if clean_path.to_lowercase().ends_with(".xlsx") {
-            if let Ok(meta) = p.metadata() {
-                if meta.len() == 0 {
-                    println!("[rdp-launcher] Initializing 0-byte Excel file with blank workbook template...");
-                    let _ = fs::write(p, BLANK_XLSX_TEMPLATE);
-                }
-            }
         }
 
         let win_path = mounts::path_to_windows(config, &clean_path)?;
