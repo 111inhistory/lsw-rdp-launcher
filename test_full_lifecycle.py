@@ -17,7 +17,19 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 RDP_LAUNCHER = "/usr/local/bin/rdp-launcher"
-VM_NAME = "win11"
+
+def get_config_val(key, default=""):
+    try:
+        res = subprocess.run([RDP_LAUNCHER, "config", "get", key], capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return default
+
+VM_NAME = get_config_val("lifecycle.vm_name", "win11")
+VM_USER = get_config_val("server.user", "skwj111")
+VIRTIO_MEM_ALIAS = get_config_val("lifecycle.virtio_mem_alias", "ua-virtiomem0")
 
 def step(title):
     print(f"\n{BOLD}{CYAN}=== [STEP] {title} ==={RESET}")
@@ -203,7 +215,7 @@ def main():
     ip_first = vm_ip.split(",")[0].strip()
     if "%" in ip_first:
         ip_first = vm_ip.split(",")[1].strip()
-    run(f'ssh skwj111@{ip_first} "pwsh -NoProfile -Command \\"Get-Process -Name charmap -ErrorAction SilentlyContinue | Stop-Process -Force\\""')
+    run(f'ssh {VM_USER}@{ip_first} "pwsh -NoProfile -Command \\"Get-Process -Name charmap -ErrorAction SilentlyContinue | Stop-Process -Force\\""')
 
     # 验证本地窗口消失
     for _ in range(10):
@@ -232,8 +244,8 @@ def main():
 
     # STEP 7: 测试 virtio-mem 动态回收与虚拟机挂起/唤醒
     step("7. 测试 virtio-mem 内存动态回收与挂起")
-    info("执行 update-memory-device 回收 virtio-mem 动态内存至 0...")
-    run(f"virsh update-memory-device {VM_NAME} --alias ua-virtiomem0 --requested-size 0 --live", check=True)
+    info(f"执行 update-memory-device 回收 virtio-mem 动态内存至 0 (alias: {VIRTIO_MEM_ALIAS})...")
+    run(f"virsh update-memory-device {VM_NAME} --alias {VIRTIO_MEM_ALIAS} --requested-size 0 --live", check=True)
     success("virtio-mem 动态内存回收指令执行成功！")
 
     info("执行虚拟机挂起 (virsh suspend)...")
@@ -257,7 +269,7 @@ def main():
     success(f"虚拟机在 {(time.time() - t_wake_start):.2f} 秒内自动恢复运行！")
 
     # 清理刚才的 charmap
-    run(f'ssh skwj111@{ip_first} "pwsh -NoProfile -Command \\"Get-Process -Name charmap -ErrorAction SilentlyContinue | Stop-Process -Force\\""')
+    run(f'ssh {VM_USER}@{ip_first} "pwsh -NoProfile -Command \\"Get-Process -Name charmap -ErrorAction SilentlyContinue | Stop-Process -Force\\""')
 
     # STEP 9: 清理并退出
     step("9. 最终清理与测试收尾")

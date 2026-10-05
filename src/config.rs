@@ -24,9 +24,10 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        let default_user = std::env::var("USER").unwrap_or_else(|_| "Administrator".to_string());
         Self {
-            host: "192.168.122.14".to_string(),
-            user: "skwj111".to_string(),
+            host: "auto".to_string(),
+            user: default_user,
             service: "rdp-bridge".to_string(),
         }
     }
@@ -46,7 +47,13 @@ pub struct FreeRdpConfig {
 }
 
 pub fn find_default_freerdp_bin() -> String {
-    // 1. Check PATH
+    // 1. Check FREERDP_BIN environment variable
+    if let Ok(env_bin) = std::env::var("FREERDP_BIN") {
+        if std::path::Path::new(&env_bin).is_file() {
+            return env_bin;
+        }
+    }
+    // 2. Check PATH
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join("sdl-freerdp");
@@ -55,17 +62,16 @@ pub fn find_default_freerdp_bin() -> String {
             }
         }
     }
-    // 2. Check standard system and local dev paths
+    // 3. Check standard system locations
     for candidate in &[
         "/usr/local/bin/sdl-freerdp",
         "/usr/bin/sdl-freerdp",
-        "/code/freerdp/build/client/SDL/SDL3/sdl-freerdp",
     ] {
         if std::path::Path::new(candidate).is_file() {
             return candidate.to_string();
         }
     }
-    // 3. Generic command fallback
+    // 4. Generic command fallback
     "sdl-freerdp".to_string()
 }
 

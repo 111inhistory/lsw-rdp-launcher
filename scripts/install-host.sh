@@ -9,7 +9,17 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CURRENT_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 USER_UID=$(id -u "$CURRENT_USER")
-WAYLAND_DISP="${WAYLAND_DISPLAY:-wayland-1}"
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    WAYLAND_DISP="$WAYLAND_DISPLAY"
+else
+    # Auto-detect active wayland socket in user's runtime directory
+    ACTIVE_SOCK=$(find "/run/user/$USER_UID" -maxdepth 1 -name "wayland-*" ! -name "*.lock" 2>/dev/null | head -n 1 || true)
+    if [ -n "$ACTIVE_SOCK" ]; then
+        WAYLAND_DISP=$(basename "$ACTIVE_SOCK")
+    else
+        WAYLAND_DISP="wayland-0"
+    fi
+fi
 
 echo "===================================================="
 echo "  rdp-launcher Linux Host Installer"

@@ -210,11 +210,21 @@ fn get_or_prompt_password(service: &str, user: &str) -> Result<String> {
 }
 
 pub fn get_cache_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("rdp-launcher");
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".cache").join("rdp-launcher")
 }
 
 pub fn get_desktop_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("applications");
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".local").join("share").join("applications")
 }
@@ -296,7 +306,7 @@ fn ensure_display_environment() -> Result<()> {
         eprintln!("    1. Run directly from within your Wayland graphical desktop (e.g. Niri terminal/dms).");
         eprintln!("    2. If you are connected via SSH and intentionally wish to launch the window");
         eprintln!("       onto the host machine's physical desktop, explicitly specify your display:");
-        eprintln!("         WAYLAND_DISPLAY=wayland-1 rdp-launcher run <app>");
+        eprintln!("         WAYLAND_DISPLAY=wayland-0 rdp-launcher run <app>");
         eprintln!("{}\n", "=".repeat(72));
         bail!("Aborted: No Wayland ($WAYLAND_DISPLAY) or X11 ($DISPLAY) socket in current session.");
     }
@@ -323,12 +333,20 @@ fn ensure_display_environment() -> Result<()> {
 }
 
 pub fn resolve_freerdp_binary(configured: &str) -> Result<String> {
+    // 1. Check FREERDP_BIN environment variable
+    if let Ok(env_bin) = std::env::var("FREERDP_BIN") {
+        if std::path::Path::new(&env_bin).is_file() {
+            return Ok(env_bin);
+        }
+    }
+
+    // 2. If configured as an existing file path, use it directly
     let p = std::path::Path::new(configured);
     if p.is_file() {
         return Ok(configured.to_string());
     }
 
-    // Search PATH
+    // 3. Search PATH
     let target = if configured.is_empty() { "sdl-freerdp" } else { configured };
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
@@ -339,11 +357,10 @@ pub fn resolve_freerdp_binary(configured: &str) -> Result<String> {
         }
     }
 
-    // Common standard fallbacks
+    // 4. Common standard system fallbacks
     for fb in &[
         "/usr/local/bin/sdl-freerdp",
         "/usr/bin/sdl-freerdp",
-        "/code/freerdp/build/client/SDL/SDL3/sdl-freerdp",
     ] {
         if std::path::Path::new(fb).is_file() {
             return Ok(fb.to_string());
@@ -587,14 +604,17 @@ fn run_remote_target(config: &Config, target: &str) -> Result<()> {
     ensure_freerdp_session(config)?;
 
     // 2. Resolve target if it matches a cached Name or ID
+    let target_lower = target.to_lowercase();
     let resolved_target = if let Ok(data) = fs::read_to_string(get_cache_dir().join("apps.json")) {
         if let Ok(apps) = serde_json::from_str::<Vec<RemoteAppInfo>>(&data) {
             if let Some(app) = apps.iter().find(|a| {
                 a.id.eq_ignore_ascii_case(target) 
                 || a.name.eq_ignore_ascii_case(target)
-                || (target.eq_ignore_ascii_case("notepad") && (a.name == "记事本" || a.target.contains("Notepad")))
-                || (target.eq_ignore_ascii_case("calc") && (a.name == "计算器" || a.target.contains("Calculator")))
-                || (target.eq_ignore_ascii_case("terminal") && (a.name == "终端" || a.target.contains("Terminal")))
+                || a.target.to_lowercase().ends_with(&format!("\\{}.exe", target_lower))
+                || a.target.to_lowercase().ends_with(&format!("/{}.exe", target_lower))
+                || (target_lower == "notepad" && a.target.to_lowercase().contains("notepad"))
+                || (target_lower == "calc" && (a.id == "calculator" || a.target.to_lowercase().contains("calculator")))
+                || (target_lower == "cmd" && (a.id == "command-prompt" || a.target.to_lowercase().ends_with("\\cmd.exe")))
             }) {
                 app.target.clone()
             } else {
