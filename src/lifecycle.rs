@@ -168,9 +168,11 @@ pub fn run_watcher(config: Config) -> Result<()> {
 
     let mut rdp_idle_start: Option<Instant> = None;
     let mut vm_idle_start: Option<Instant> = None;
+    let mut cached_ips: Vec<String> = Vec::new();
+    let mut last_ip_fetch = Instant::now() - Duration::from_secs(100);
 
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(2));
 
         // 1. Check VM state
         let vm_state = match get_vm_state(vm_name) {
@@ -184,12 +186,19 @@ pub fn run_watcher(config: Config) -> Result<()> {
         if !is_running {
             rdp_idle_start = None;
             vm_idle_start = None;
+            cached_ips.clear();
             continue;
         }
 
-        // 2. Get all VM IPs and check SSH connections
-        let vm_ips = get_vm_ips(vm_name);
-        let ssh_active = has_active_ssh(&vm_ips, &config.server.host);
+        // 2. Refresh VM IPs periodically (every 30s) or if empty
+        if cached_ips.is_empty() || last_ip_fetch.elapsed() > Duration::from_secs(30) {
+            let fetched = get_vm_ips(vm_name);
+            if !fetched.is_empty() {
+                cached_ips = fetched;
+                last_ip_fetch = Instant::now();
+            }
+        }
+        let ssh_active = has_active_ssh(&cached_ips, &config.server.host);
 
         // 3. Check FreeRDP session & window count
         let freerdp_active = is_freerdp_running();
