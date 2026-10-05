@@ -18,6 +18,49 @@ pub struct Config {
     pub mounts: HashMap<String, String>,
     #[serde(default)]
     pub samba: SambaConfig,
+    #[serde(default = "default_overrides")]
+    pub overrides: Vec<AppOverride>,
+}
+
+pub fn default_overrides() -> Vec<AppOverride> {
+    vec![
+        AppOverride {
+            match_pattern: "excel".to_string(),
+            mimes: vec![
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(),
+                "application/vnd.ms-excel".to_string(),
+                "text/csv".to_string(),
+            ],
+            categories: Some("Office;Spreadsheet;RemoteApp;Network;".to_string()),
+        },
+        AppOverride {
+            match_pattern: "word".to_string(),
+            mimes: vec![
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
+                "application/msword".to_string(),
+                "application/rtf".to_string(),
+            ],
+            categories: Some("Office;WordProcessor;RemoteApp;Network;".to_string()),
+        },
+        AppOverride {
+            match_pattern: "powerpoint".to_string(),
+            mimes: vec![
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string(),
+                "application/vnd.ms-powerpoint".to_string(),
+            ],
+            categories: Some("Office;Presentation;RemoteApp;Network;".to_string()),
+        },
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppOverride {
+    #[serde(rename = "match")]
+    pub match_pattern: String,
+    #[serde(default)]
+    pub mimes: Vec<String>,
+    #[serde(default)]
+    pub categories: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +206,7 @@ impl Default for Config {
             lifecycle: LifecycleConfig::default(),
             mounts: HashMap::new(),
             samba: SambaConfig::default(),
+            overrides: default_overrides(),
         }
     }
 }

@@ -813,7 +813,8 @@ fn main() {
             }
         }
         "run" => {
-            if let Some(cmd) = args.get(2) {
+            if args.len() > 2 {
+                let cmd = args[2..].join(" ");
                 if send_pipe_command(&format!("RUN {}", cmd)) {
                     print_to_stdout(&format!("OK: {}\r\n", cmd));
                     std::process::exit(0);

@@ -178,10 +178,11 @@ enum Commands {
         to_linux: bool,
     },
 
-    /// Open a Linux file directly in Windows (e.g. Office 365, Excel, Word) via RemoteApp
+    /// Open one or more Linux files directly in Windows (e.g. Office 365, Excel, Word) via RemoteApp
     Open {
-        /// Linux file path to open (must be within a shared mount)
-        file: String,
+        /// Linux file path(s) or file:// URIs to open. If omitted, launches the application empty.
+        #[arg(trailing_var_arg = true)]
+        files: Vec<String>,
 
         /// Optional: specific application name, ID or path to open the file with
         #[arg(short, long)]
@@ -504,13 +505,11 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     }
 
     println!("[rdp-launcher] Awaiting remote daemon initialization...");
-    let probe_cmd = format!("pwsh -NoProfile -Command \"& '{}' ping\"", daemon_app);
-
     let mut ready = false;
     for i in 0..60 {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         let out = Command::new("ssh")
-            .args(&[format!("{}@{}", user, host), probe_cmd.clone()])
+            .args(&[format!("{}@{}", user, host), daemon_app.clone(), "ping".to_string()])
             .output();
         if let Ok(o) = out {
             if o.status.success() {
@@ -539,7 +538,7 @@ fn sync_remote_apps(config: &Config, create_desktop: bool) -> Result<()> {
 
     println!("Fetching installed applications from {}@{} via SSH...", user, host);
 
-    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' list-apps --with-icons | Out-String\"", daemon_app);
+    let remote_cmd = format!("& '{}' list-apps --with-icons | Out-String", daemon_app);
     let output = Command::new("ssh")
         .args(&[format!("{}@{}", user, host), remote_cmd])
         .output()
@@ -586,20 +585,46 @@ fn sync_remote_apps(config: &Config, create_desktop: bool) -> Result<()> {
                 String::new()
             };
 
+            // Check if app matches any user-configured override rule
+            let matched_override = config.overrides.iter().find(|ov| {
+                let m = ov.match_pattern.to_lowercase();
+                app.id.to_lowercase() == m 
+                || app.name.to_lowercase().contains(&m) 
+                || app.target.to_lowercase().contains(&m)
+            });
+
+            let (exec_line, extra_fields) = if let Some(ov) = matched_override {
+                let mimes_str = if !ov.mimes.is_empty() {
+                    format!("MimeType={};\n", ov.mimes.join(";"))
+                } else {
+                    String::new()
+                };
+                let cats = ov.categories.as_deref().unwrap_or("Office;RemoteApp;Network;\n");
+                let cats_str = if cats.ends_with('\n') { cats.to_string() } else { format!("Categories={}\n", cats) };
+                (
+                    format!("{} open --app {} %F", self_exe.display(), app.id),
+                    format!("{}{}", mimes_str, cats_str)
+                )
+            } else {
+                (
+                    format!("{} run {}", self_exe.display(), app.id),
+                    "Categories=RemoteApp;Network;\n".to_string()
+                )
+            };
+
             let entry_content = format!(
                 "[Desktop Entry]\n\
                  Version=1.0\n\
                  Type=Application\n\
                  Name={} (Remote)\n\
                  Comment=RemoteApp on {}\n\
-                 Exec={} run {}\n\
-                 {}Terminal=false\n\
-                 Categories=RemoteApp;Network;\n",
+                 Exec={}\n\
+                 {}{}Terminal=false\n",
                 app.name,
                 host,
-                self_exe.display(),
-                app.id,
-                icon_entry
+                exec_line,
+                icon_entry,
+                extra_fields
             );
 
             let _ = fs::write(&desktop_file, entry_content);
@@ -659,22 +684,75 @@ fn resolve_app_target(target: &str) -> String {
     target.to_string()
 }
 
-fn open_remote_file(config: &Config, file_path_str: &str, app: Option<&str>) -> Result<()> {
-    let p = std::path::Path::new(file_path_str);
-    if !p.exists() {
-        bail!("File '{}' does not exist on host.", file_path_str);
+pub fn sanitize_file_path(input: &str) -> String {
+    let mut s = input.trim();
+    if let Some(stripped) = s.strip_prefix("file://localhost") {
+        s = stripped;
+    } else if let Some(stripped) = s.strip_prefix("file://") {
+        s = stripped;
+    }
+    percent_decode(s)
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut bytes = Vec::new();
+    let input = s.as_bytes();
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&input[i+1..i+3]).unwrap_or(""), 16) {
+                bytes.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(input[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+const BLANK_XLSX_TEMPLATE: &[u8] = include_bytes!("blank_template.xlsx");
+
+fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) -> Result<()> {
+    if file_paths.is_empty() {
+        if let Some(app_name) = app {
+            return run_remote_target(config, app_name);
+        } else {
+            bail!("No file specified to open. Usage: rdp-launcher open <FILE> [--app <APP>]");
+        }
     }
 
-    let win_path = mounts::path_to_windows(config, file_path_str)?;
-    println!("[rdp-launcher] Mapped file: '{}' -> '{}'", file_path_str, win_path);
+    let mut win_paths = Vec::new();
+    for f in file_paths {
+        let clean_path = sanitize_file_path(f);
+        let p = std::path::Path::new(&clean_path);
+        if !p.exists() {
+            bail!("File '{}' does not exist on host (decoded from '{}').", clean_path, f);
+        }
+
+        // If it's a 0-byte newly created Excel file, initialize it with a standard blank workbook template
+        if clean_path.to_lowercase().ends_with(".xlsx") {
+            if let Ok(meta) = p.metadata() {
+                if meta.len() == 0 {
+                    println!("[rdp-launcher] Initializing 0-byte Excel file with blank workbook template...");
+                    let _ = fs::write(p, BLANK_XLSX_TEMPLATE);
+                }
+            }
+        }
+
+        let win_path = mounts::path_to_windows(config, &clean_path)?;
+        println!("[rdp-launcher] Mapped file: '{}' -> '{}'", clean_path, win_path);
+        win_paths.push(format!("\"{}\"", win_path));
+    }
 
     ensure_freerdp_session(config)?;
 
     let final_target = if let Some(app_name) = app {
         let resolved_app = resolve_app_target(app_name);
-        format!("\"{}\" \"{}\"", resolved_app, win_path)
+        format!("\"{}\" {}", resolved_app, win_paths.join(" "))
     } else {
-        format!("\"{}\"", win_path)
+        win_paths.join(" ")
     };
 
     let user = &config.server.user;
@@ -682,9 +760,13 @@ fn open_remote_file(config: &Config, file_path_str: &str, app: Option<&str>) -> 
     let daemon_app = &config.remoteapp.default_app;
     println!("[rdp-launcher] Opening on Windows guest via RemoteApp...");
 
-    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' run '{}'\"", daemon_app, final_target);
     let status = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), remote_cmd])
+        .args(&[
+            format!("{}@{}", user, host),
+            daemon_app.clone(),
+            "run".to_string(),
+            final_target,
+        ])
         .status()
         .context("Failed to dispatch open command via SSH")?;
 
@@ -707,9 +789,13 @@ fn run_remote_target(config: &Config, target: &str) -> Result<()> {
     let daemon_app = &config.remoteapp.default_app;
     println!("[rdp-launcher] Requesting remote host {}@{} to launch '{}'...", user, host, resolved_target);
 
-    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' run '{}'\"", daemon_app, resolved_target);
     let status = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), remote_cmd])
+        .args(&[
+            format!("{}@{}", user, host),
+            daemon_app.clone(),
+            "run".to_string(),
+            resolved_target,
+        ])
         .status()
         .context("Failed to send run command via SSH")?;
 
@@ -726,9 +812,8 @@ pub fn stop_remote_daemon(config: &Config) -> Result<()> {
     let daemon_app = &config.remoteapp.default_app;
 
     println!("Stopping RemoteApp daemon on {}@{}...", user, host);
-    let remote_cmd = format!("pwsh -NoProfile -Command \"& '{}' stop\"", daemon_app);
     let _ = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), remote_cmd])
+        .args(&[format!("{}@{}", user, host), daemon_app.clone(), "stop".to_string()])
         .status();
 
     let _ = Command::new("pkill").arg("-x").arg("sdl-freerdp").status();
@@ -858,24 +943,25 @@ fn main() -> Result<()> {
             }
         }
         Commands::Path { path, to_win, to_linux } => {
+            let clean_input = sanitize_file_path(&path);
             let is_windows = if to_win {
                 false
             } else if to_linux {
                 true
             } else {
-                path.len() >= 2 && path.chars().nth(1) == Some(':')
+                clean_input.len() >= 2 && clean_input.chars().nth(1) == Some(':')
             };
 
             if is_windows {
-                let linux_p = mounts::path_to_linux(&config, &path)?;
+                let linux_p = mounts::path_to_linux(&config, &clean_input)?;
                 println!("{}", linux_p);
             } else {
-                let win_p = mounts::path_to_windows(&config, &path)?;
+                let win_p = mounts::path_to_windows(&config, &clean_input)?;
                 println!("{}", win_p);
             }
         }
-        Commands::Open { file, app } => {
-            open_remote_file(&config, &file, app.as_deref())?;
+        Commands::Open { files, app } => {
+            open_remote_files(&config, &files, app.as_deref())?;
         }
         Commands::StopDaemon => {
             stop_remote_daemon(&config)?;

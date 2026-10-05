@@ -60,10 +60,9 @@ pub fn parse_samba_shares(conf_path: &Path) -> Result<HashMap<String, String>> {
 /// Queries Windows guest mapped network drives (DriveType=4) via WMI / PowerShell
 pub fn query_windows_mapped_drives(user: &str, host: &str) -> Result<Vec<(String, String)>> {
     let ps_cmd = "Get-CimInstance Win32_LogicalDisk | Where-Object DriveType -eq 4 | Select-Object DeviceID, ProviderName | ConvertTo-Json -Compress";
-    let remote_cmd = format!("powershell -NoProfile -Command \"{}\"", ps_cmd);
 
     let output = Command::new("ssh")
-        .args(&[format!("{}@{}", user, host), remote_cmd])
+        .args(&[format!("{}@{}", user, host), ps_cmd.to_string()])
         .output()
         .context("Failed to execute SSH command to query Windows network drives")?;
 
