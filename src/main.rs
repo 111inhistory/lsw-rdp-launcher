@@ -602,7 +602,7 @@ fn sync_remote_apps(config: &Config, create_desktop: bool) -> Result<()> {
                 let cats = ov.categories.as_deref().unwrap_or("Office;RemoteApp;Network;\n");
                 let cats_str = if cats.ends_with('\n') { cats.to_string() } else { format!("Categories={}\n", cats) };
                 (
-                    format!("{} open --app {} %F", self_exe.display(), app.id),
+                    format!("{} open --app {} %U", self_exe.display(), app.id),
                     format!("{}{}", mimes_str, cats_str)
                 )
             } else {
