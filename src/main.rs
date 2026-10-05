@@ -816,10 +816,15 @@ fn main() -> Result<()> {
     let service = &config.server.service;
     let user = &config.server.user;
 
-    let command = cli.command.unwrap_or(Commands::Launch {
-        app: None,
-        extra_args: vec![],
-    });
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            use clap::CommandFactory;
+            Cli::command().print_help()?;
+            println!();
+            return Ok(());
+        }
+    };
 
     match command {
         Commands::SetPassword { stdin, password } => {
@@ -948,6 +953,9 @@ fn main() -> Result<()> {
         }
         Commands::Launch { app, extra_args } => {
             ensure_display_environment()?;
+
+            // Ensure VM is awake before spawning FreeRDP
+            let _ = lifecycle::resume_vm_if_needed(&config.lifecycle.vm_name);
 
             let freerdp_bin = resolve_freerdp_binary(&config.freerdp.bin)?;
 
