@@ -234,7 +234,55 @@ fn wait_for_rdp_port(host: &str, timeout_secs: u64) -> bool {
     false
 }
 
+fn ensure_display_environment() -> Result<()> {
+    let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+    let x11_display = std::env::var("DISPLAY").ok();
+
+    if wayland_display.is_none() && x11_display.is_none() {
+        eprintln!("\n{}", "=".repeat(72));
+        eprintln!("  [Error] No Wayland or X11 display socket detected in current shell!");
+        eprintln!("{}", "=".repeat(72));
+        eprintln!("  Current environment variables ($WAYLAND_DISPLAY and $DISPLAY) are not set.");
+        eprintln!("  You appear to be running inside a headless SSH session, TTY, or background script.");
+        eprintln!();
+        eprintln!("  Why did this call fail?");
+        eprintln!("    RemoteApp (via FreeRDP) creates native graphical Wayland/X11 client windows.");
+        eprintln!("    Without an active display server socket connected to this shell session, GUI");
+        eprintln!("    windows CANNOT be rendered into a text terminal.");
+        eprintln!();
+        eprintln!("  How to use RemoteApp:");
+        eprintln!("    1. Run directly from within your Wayland graphical desktop (e.g. Niri terminal/dms).");
+        eprintln!("    2. If you are connected via SSH and intentionally wish to launch the window");
+        eprintln!("       onto the host machine's physical desktop, explicitly specify your display:");
+        eprintln!("         WAYLAND_DISPLAY=wayland-1 rdp-launcher run <app>");
+        eprintln!("{}\n", "=".repeat(72));
+        bail!("Aborted: No Wayland ($WAYLAND_DISPLAY) or X11 ($DISPLAY) socket in current session.");
+    }
+
+    // If WAYLAND_DISPLAY is set, verify the socket file actually exists
+    if let Some(ref w_disp) = wayland_display {
+        let uid = unsafe {
+            extern "C" { fn getuid() -> u32; }
+            getuid()
+        };
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", uid));
+        let sock_path = std::path::Path::new(&runtime_dir).join(w_disp);
+        if !sock_path.exists() {
+            eprintln!("\n{}", "=".repeat(72));
+            eprintln!("  [Error] Wayland socket '{}' not found in $XDG_RUNTIME_DIR ({})!", w_disp, runtime_dir);
+            eprintln!("{}", "=".repeat(72));
+            eprintln!("  The Wayland compositor does not appear to be running or the socket has closed.");
+            eprintln!("{}\n", "=".repeat(72));
+            bail!("Wayland socket file '{:?}' does not exist.", sock_path);
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_freerdp_session(config: &Config) -> Result<()> {
+    ensure_display_environment()?;
+
     if is_freerdp_running() {
         return Ok(());
     }
@@ -529,7 +577,6 @@ fn main() -> Result<()> {
 
     let service = &config.server.service;
     let user = &config.server.user;
-    let host = &config.server.host;
 
     let command = cli.command.unwrap_or(Commands::Launch {
         app: None,
@@ -582,6 +629,8 @@ fn main() -> Result<()> {
             lifecycle::show_lifecycle_status(&config)?;
         }
         Commands::Launch { app, extra_args } => {
+            ensure_display_environment()?;
+
             let freerdp_bin = &config.freerdp.bin;
             if !std::path::Path::new(freerdp_bin).exists() {
                 bail!("FreeRDP binary not found at: {}", freerdp_bin);
