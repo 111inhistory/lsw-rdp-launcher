@@ -22,6 +22,8 @@ enum AgentRequest<'a> {
         target: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         params: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<&'a str>,
     },
     #[serde(rename = "open")]
     Open { file: &'a str },
@@ -148,8 +150,8 @@ impl AgentClient {
         Ok(())
     }
 
-    pub fn run_target(&self, target: &str, params: Option<&str>) -> Result<()> {
-        let _ = self.send_request(&AgentRequest::Run { target, params }, Duration::from_secs(5))?;
+    pub fn run_target(&self, target: &str, params: Option<&str>, working_dir: Option<&str>) -> Result<()> {
+        let _ = self.send_request(&AgentRequest::Run { target, params, working_dir }, Duration::from_secs(5))?;
         Ok(())
     }
 

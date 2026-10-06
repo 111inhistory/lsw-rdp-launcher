@@ -688,7 +688,7 @@ fn list_cached_apps() -> Result<()> {
     Ok(())
 }
 
-fn resolve_app_target(target: &str) -> String {
+fn resolve_app_target(target: &str) -> (String, Option<String>) {
     let target_lower = target.to_lowercase();
     if let Ok(data) = fs::read_to_string(get_cache_dir().join("apps.json")) {
         if let Ok(apps) = serde_json::from_str::<Vec<RemoteAppInfo>>(&data) {
@@ -704,11 +704,11 @@ fn resolve_app_target(target: &str) -> String {
                 || (target_lower == "calc" && (a.id == "calculator" || a.target.to_lowercase().contains("calculator")))
                 || (target_lower == "cmd" && (a.id == "command-prompt" || a.target.to_lowercase().ends_with("\\cmd.exe")))
             }) {
-                return app.target.clone();
+                return (app.target.clone(), app.working_dir.clone());
             }
         }
     }
-    target.to_string()
+    (target.to_string(), None)
 }
 
 pub fn sanitize_file_path(input: &str) -> String {
@@ -747,8 +747,8 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
         let win_path = mounts::path_to_windows(config, &clean_path)?;
         log::info!("[rdp-launcher] Mapped file: '{}' -> '{}'", clean_path, win_path);
 
-        if let Some(ref app_target) = resolved_app {
-            client.run_target(app_target, Some(&win_path))?;
+        if let Some((ref app_target, ref working_dir)) = resolved_app {
+            client.run_target(app_target, Some(&win_path), working_dir.as_deref())?;
         } else {
             client.open_file(&win_path)?;
         }
@@ -762,10 +762,10 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
 }
 
 fn run_remote_target(config: &Config, target: &str) -> Result<()> {
-    let resolved_target = resolve_app_target(target);
+    let (resolved_target, working_dir) = resolve_app_target(target);
     let client = client::get_or_ensure_client(config)?;
     log::info!("[rdp-launcher] Requesting Windows agent via TCP to launch '{}'...", resolved_target);
-    client.run_target(&resolved_target, None)?;
+    client.run_target(&resolved_target, None, working_dir.as_deref())?;
     Ok(())
 }
 

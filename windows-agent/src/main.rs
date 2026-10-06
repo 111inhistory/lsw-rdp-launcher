@@ -618,7 +618,12 @@ pub enum AgentRequest {
     #[serde(rename = "status")]
     Status,
     #[serde(rename = "run")]
-    Run { target: String, params: Option<String> },
+    Run {
+        target: String,
+        params: Option<String>,
+        #[serde(default)]
+        working_dir: Option<String>,
+    },
     #[serde(rename = "open")]
     Open { file: String },
     #[serde(rename = "list_apps")]
@@ -668,8 +673,8 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
                     drives: None,
                 }
             }
-            Ok(AgentRequest::Run { target, params }) => {
-                launch_application(&target, params.as_deref());
+            Ok(AgentRequest::Run { target, params, working_dir }) => {
+                launch_application(&target, params.as_deref(), working_dir.as_deref());
                 AgentResponse {
                     status: "ok".to_string(),
                     message: None,
@@ -679,7 +684,7 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
                 }
             }
             Ok(AgentRequest::Open { file }) => {
-                launch_application(&file, None);
+                launch_application(&file, None, None);
                 AgentResponse {
                     status: "ok".to_string(),
                     message: None,
@@ -833,7 +838,7 @@ fn run_daemon(bind_addr: std::net::SocketAddr) {
     }
 }
 
-fn launch_application(target: &str, params_opt: Option<&str>) {
+fn launch_application(target: &str, params_opt: Option<&str>, working_dir_opt: Option<&str>) {
     unsafe {
         let clean_target = target.trim().trim_matches('"');
         if clean_target.contains('!') {
@@ -857,6 +862,19 @@ fn launch_application(target: &str, params_opt: Option<&str>) {
         let wide_params = params_opt.map(to_wide);
         let open_verb = to_wide("open");
 
+        // Compute working directory: explicit > parent directory > none
+        let computed_dir = working_dir_opt
+            .map(|s| s.to_string())
+            .or_else(|| {
+                let p = Path::new(clean_target);
+                if p.is_file() {
+                    p.parent().and_then(|parent| parent.to_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            });
+        let wide_dir = computed_dir.as_deref().map(to_wide);
+
         let mut sei: SHELLEXECUTEINFOW = std::mem::zeroed();
         sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
         sei.fMask = SEE_MASK_DOENVSUBST | SEE_MASK_FLAG_NO_UI;
@@ -864,6 +882,9 @@ fn launch_application(target: &str, params_opt: Option<&str>) {
         sei.lpFile = wide_file.as_ptr();
         if let Some(ref p) = wide_params {
             sei.lpParameters = p.as_ptr();
+        }
+        if let Some(ref d) = wide_dir {
+            sei.lpDirectory = d.as_ptr();
         }
         sei.nShow = SW_SHOWNORMAL;
 
@@ -978,6 +999,7 @@ fn main() {
                 let req = AgentRequest::Run {
                     target: target.clone(),
                     params: params_opt,
+                    working_dir: None,
                 };
                 if send_tcp_request(&req).is_ok() {
                     print_to_stdout(&format!("OK: {}\r\n", target));
