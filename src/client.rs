@@ -60,15 +60,19 @@ impl AgentClient {
     }
 
     fn connect(&self, read_timeout: Duration) -> Result<TcpStream> {
+        self.connect_with_timeout(TCP_TIMEOUT, read_timeout)
+    }
+
+    fn connect_with_timeout(&self, conn_timeout: Duration, read_timeout: Duration) -> Result<TcpStream> {
         let addr_str = format!("{}:{}", self.host, self.port);
         let addrs: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&addr_str)
             .with_context(|| format!("Failed to resolve agent address: {}", addr_str))?
             .collect();
 
         for addr in addrs {
-            if let Ok(stream) = TcpStream::connect_timeout(&addr, TCP_TIMEOUT) {
+            if let Ok(stream) = TcpStream::connect_timeout(&addr, conn_timeout) {
                 let _ = stream.set_read_timeout(Some(read_timeout));
-                let _ = stream.set_write_timeout(Some(TCP_TIMEOUT));
+                let _ = stream.set_write_timeout(Some(conn_timeout));
                 return Ok(stream);
             }
         }
@@ -102,8 +106,31 @@ impl AgentClient {
     }
 
     pub fn ping(&self) -> Result<()> {
-        let _ = self.send_request(&AgentRequest::Ping, Duration::from_secs(2))?;
-        Ok(())
+        self.ping_timeout(Duration::from_millis(200))
+    }
+
+    pub fn ping_timeout(&self, timeout: Duration) -> Result<()> {
+        let mut stream = self.connect_with_timeout(timeout, timeout)?;
+        let mut json_req = serde_json::to_string(&AgentRequest::Ping)?;
+        json_req.push('\n');
+
+        stream.write_all(json_req.as_bytes())
+            .context("Failed to write ping to agent TCP socket")?;
+        stream.flush().context("Failed to flush TCP stream")?;
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line)
+            .context("Failed to read ping response from agent TCP socket")?;
+
+        let resp: AgentResponse = serde_json::from_str(line.trim())
+            .with_context(|| format!("Failed to parse agent JSON response: '{}'", line.trim()))?;
+
+        if resp.status == "ok" {
+            Ok(())
+        } else {
+            bail!("Agent returned non-ok ping status")
+        }
     }
 
     pub fn get_active_ssh_count(&self) -> Result<usize> {

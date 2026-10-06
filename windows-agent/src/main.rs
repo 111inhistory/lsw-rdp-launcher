@@ -564,17 +564,52 @@ fn count_active_ssh_connections() -> Option<usize> {
     }
 }
 
-fn get_internal_bind_ip() -> std::net::IpAddr {
-    // Determine the local IP assigned on the interface facing the Linux host gateway (192.168.122.1)
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("192.168.122.1:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                return addr.ip();
+fn init_logger() -> Option<flexi_logger::LoggerHandle> {
+    let temp_dir = std::env::var("TEMP").unwrap_or_else(|_| "C:\\Windows\\Temp".to_string());
+    match flexi_logger::Logger::try_with_str("info") {
+        Ok(l) => {
+            match l.log_to_file(
+                flexi_logger::FileSpec::default()
+                    .directory(temp_dir)
+                    .basename("remoteapp-launcher")
+                    .suppress_timestamp(),
+            )
+            .rotate(
+                flexi_logger::Criterion::Size(1024 * 1024),
+                flexi_logger::Naming::Numbers,
+                flexi_logger::Cleanup::KeepLogFiles(1),
+            )
+            .start() {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    eprintln!("flexi_logger start error: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("flexi_logger try_with_str error: {}", e);
+            None
+        }
+    }
+}
+
+fn parse_bind_addr(args: &[String]) -> std::net::SocketAddr {
+    for i in 0..args.len() {
+        if args[i] == "--bind" && i + 1 < args.len() {
+            let val = &args[i + 1];
+            if let Ok(addr) = val.parse::<std::net::SocketAddr>() {
+                return addr;
+            } else if let Ok(ip) = val.parse::<std::net::IpAddr>() {
+                return std::net::SocketAddr::new(ip, DEFAULT_TCP_PORT);
             }
         }
     }
-    // Fallback: explicitly bind to 192.168.122.14 (the host-only / NAT adapter)
-    std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 122, 14))
+    // Safe localhost default when no external bind flag is supplied
+    std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        DEFAULT_TCP_PORT,
+    )
 }
 
 const DEFAULT_TCP_PORT: u16 = 49152;
@@ -624,6 +659,7 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
     let mut line = String::new();
 
     if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
+        log::info!("Incoming TCP request: {}", line.trim());
         let req_res: Result<AgentRequest, _> = serde_json::from_str(line.trim());
         let response = match req_res {
             Ok(AgentRequest::Ping) | Ok(AgentRequest::Status) => {
@@ -698,6 +734,7 @@ fn handle_tcp_client(stream: &mut std::net::TcpStream, hwnd: HWND) {
         };
 
         if let Ok(resp_json) = serde_json::to_string(&response) {
+            log::info!("Outgoing TCP response (status: {})", response.status);
             let _ = stream.write_all(resp_json.as_bytes());
             let _ = stream.write_all(b"\n");
             let _ = stream.flush();
@@ -710,7 +747,7 @@ enum LaunchTask {
     Quit,
 }
 
-fn run_daemon() {
+fn run_daemon(bind_addr: std::net::SocketAddr) {
     unsafe {
         let chwnd = GetConsoleWindow();
         if !chwnd.is_null() {
@@ -768,23 +805,25 @@ fn run_daemon() {
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
         SetTimer(hwnd, TIMER_KEEPALIVE_ID, 60_000, None);
 
-        // TCP server listener thread restricted specifically to host-only / NAT adapter
+        // TCP server listener thread bound strictly to the address commanded by the host launcher
         let hwnd_for_tcp = hwnd as usize;
         std::thread::spawn(move || {
-            let bind_ip = get_internal_bind_ip();
-            let addr = format!("{}:{}", bind_ip, DEFAULT_TCP_PORT);
-            if let Ok(listener) = std::net::TcpListener::bind(&addr) {
-                println!("TCP Agent listening on {} (host-only adapter)", addr);
-                for stream in listener.incoming() {
-                    if !RUNNING.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    if let Ok(mut s) = stream {
-                        handle_tcp_client(&mut s, hwnd_for_tcp as HWND);
+            match std::net::TcpListener::bind(bind_addr) {
+                Ok(listener) => {
+                    log::info!("TCP Agent successfully listening on {}", bind_addr);
+                    for stream in listener.incoming() {
+                        if !RUNNING.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if let Ok(mut s) = stream {
+                            handle_tcp_client(&mut s, hwnd_for_tcp as HWND);
+                        }
                     }
                 }
-            } else {
-                eprintln!("Failed to bind TCP listener on {}", addr);
+                Err(e) => {
+                    log::error!("CRITICAL ERROR: Failed to bind TCP listener on {}: {}", bind_addr, e);
+                    eprintln!("Failed to bind TCP listener on {}: {}", bind_addr, e);
+                }
             }
         });
 
@@ -956,8 +995,12 @@ fn main() {
         AttachConsole(0xFFFFFFFF);
         SetConsoleOutputCP(65001);
     }
+    let _logger = init_logger();
+
     let args: Vec<String> = std::env::args().collect();
     let subcommand = args.get(1).map(|s| s.as_str()).unwrap_or("daemon");
+
+    log::info!("Process started: subcommand='{}', all_args={:?}", subcommand, args);
 
     // Enforce strict singleton for the daemon instance in this session
     if subcommand == "daemon" {
@@ -965,7 +1008,7 @@ fn main() {
             let mutex_name = to_wide("Local\\RemoteAppLauncher_Singleton_Mutex");
             let h_mutex = CreateMutexW(ptr::null_mut(), FALSE, mutex_name.as_ptr());
             if h_mutex.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
-                // Another instance is already running; exit silently
+                log::info!("Singleton mutex check: another daemon instance is already active. Exiting.");
                 std::process::exit(0);
             }
         }
@@ -1023,7 +1066,8 @@ fn main() {
             }
         }
         "daemon" | _ => {
-            run_daemon();
+            let bind_addr = parse_bind_addr(&args);
+            run_daemon(bind_addr);
         }
     }
 }

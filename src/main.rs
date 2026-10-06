@@ -438,11 +438,17 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     let password = get_or_prompt_password(service, user)?;
 
     let daemon_app = &config.remoteapp.default_app;
+    let bind_cmd = format!("daemon --bind {}:{}", host, config.server.agent_port);
+    let app_opt = if daemon_app.contains(' ') {
+        format!("\"program:{},cmd:{}\"", daemon_app, bind_cmd)
+    } else {
+        format!("program:{},cmd:{}", daemon_app, bind_cmd)
+    };
 
     let mut args = vec![
         format!("/v:{}", host),
         format!("/u:{}", user),
-        format!("/app:program:\"{}\"", daemon_app),
+        format!("/app:{}", app_opt),
         "/from-stdin:force".to_string(),
     ];
 
@@ -467,6 +473,15 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     let cache_dir = get_cache_dir();
     let _ = fs::create_dir_all(&cache_dir);
     let log_path = cache_dir.join("freerdp.log");
+
+    // Active log rotation: cap at 5MB, keep 1 backup file
+    if let Ok(meta) = fs::metadata(&log_path) {
+        if meta.len() > 5 * 1024 * 1024 {
+            let bak = cache_dir.join("freerdp.log.1");
+            let _ = fs::rename(&log_path, &bak);
+        }
+    }
+
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -508,14 +523,20 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     println!("[rdp-launcher] Awaiting remote daemon initialization via TCP...");
     let client = client::AgentClient::new(&host, config.server.agent_port);
     let mut ready = false;
-    for i in 0..60 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if client.ping().is_ok() {
+    let start = std::time::Instant::now();
+    let max_wait = std::time::Duration::from_secs(30);
+    let mut last_log_sec = 0;
+
+    while start.elapsed() < max_wait {
+        if client.ping_timeout(std::time::Duration::from_millis(150)).is_ok() {
             ready = true;
             break;
         }
-        if (i + 1) % 10 == 0 {
-            println!("[rdp-launcher] Still awaiting remote daemon ({}s elapsed)...", (i + 1) / 2);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let elapsed_sec = start.elapsed().as_secs();
+        if elapsed_sec >= last_log_sec + 5 {
+            last_log_sec = elapsed_sec;
+            println!("[rdp-launcher] Still awaiting remote daemon ({}s elapsed)...", elapsed_sec);
         }
     }
 
