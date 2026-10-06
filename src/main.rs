@@ -258,6 +258,29 @@ pub fn get_cache_dir() -> PathBuf {
     PathBuf::from(home).join(".cache").join("rdp-launcher")
 }
 
+pub fn init_logging() -> Option<flexi_logger::LoggerHandle> {
+    let cache_dir = get_cache_dir();
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    flexi_logger::Logger::try_with_env_or_str("info")
+        .ok()?
+        .log_to_file(
+            flexi_logger::FileSpec::default()
+                .directory(&cache_dir)
+                .basename("rdp-launcher")
+                .suppress_timestamp(),
+        )
+        .rotate(
+            flexi_logger::Criterion::Size(1024 * 1024), // 1MB limit per file
+            flexi_logger::Naming::Numbers,              // rdp-launcher.1.log
+            flexi_logger::Cleanup::KeepLogFiles(1),     // keep at most 1 backup file
+        )
+        .duplicate_to_stderr(flexi_logger::Duplicate::Info)
+        .format(flexi_logger::opt_format)
+        .start()
+        .ok()
+}
+
 pub fn get_desktop_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
@@ -425,11 +448,11 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     let _ = lifecycle::resume_vm_if_needed(&config.lifecycle.vm_name);
 
     let host = resolve_host_ip(config);
-    println!("[rdp-launcher] Waiting for Windows RDP service on {}:3389 to become reachable...", host);
+    log::info!("[rdp-launcher] Waiting for Windows RDP service on {}:3389 to become reachable...", host);
     if !wait_for_rdp_port(&host, 90) {
         bail!("Timed out waiting for {}:3389 to become reachable", host);
     }
-    println!("[rdp-launcher] {}:3389 is online! Starting RemoteApp daemon...", host);
+    log::info!("[rdp-launcher] {}:3389 is online! Starting RemoteApp daemon...", host);
 
     let freerdp_bin = resolve_freerdp_binary(&config.freerdp.bin)?;
 
@@ -509,7 +532,7 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
     cmd.env("no_proxy", "*");
     cmd.env("NO_PROXY", "*");
 
-    println!("[rdp-launcher] Spawning FreeRDP in background (logging to {:?})...", log_path);
+    log::info!("[rdp-launcher] Spawning FreeRDP in background (logging to {:?})...", log_path);
     let mut child = cmd.spawn()
         .with_context(|| format!("Failed to spawn FreeRDP ({})", freerdp_bin))?;
 
@@ -520,7 +543,7 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
         drop(stdin);
     }
 
-    println!("[rdp-launcher] Awaiting remote daemon initialization via TCP...");
+    log::info!("[rdp-launcher] Awaiting remote daemon initialization via TCP...");
     let client = client::AgentClient::new(&host, config.server.agent_port);
     let mut ready = false;
     let start = std::time::Instant::now();
@@ -536,14 +559,14 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
         let elapsed_sec = start.elapsed().as_secs();
         if elapsed_sec >= last_log_sec + 5 {
             last_log_sec = elapsed_sec;
-            println!("[rdp-launcher] Still awaiting remote daemon ({}s elapsed)...", elapsed_sec);
+            log::info!("[rdp-launcher] Still awaiting remote daemon ({}s elapsed)...", elapsed_sec);
         }
     }
 
     if ready {
-        println!("[rdp-launcher] RemoteApp session and TCP agent ready!");
+        log::info!("[rdp-launcher] RemoteApp session and TCP agent ready!");
     } else {
-        println!("[rdp-launcher] Daemon initialization taking longer, proceeding...");
+        log::warn!("[rdp-launcher] Daemon initialization taking longer, proceeding...");
     }
 
     Ok(())
@@ -723,7 +746,7 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
         }
 
         let win_path = mounts::path_to_windows(config, &clean_path)?;
-        println!("[rdp-launcher] Mapped file: '{}' -> '{}'", clean_path, win_path);
+        log::info!("[rdp-launcher] Mapped file: '{}' -> '{}'", clean_path, win_path);
 
         if let Some(ref app_target) = resolved_app {
             client.run_target(app_target, Some(&win_path))?;
@@ -742,7 +765,7 @@ fn open_remote_files(config: &Config, file_paths: &[String], app: Option<&str>) 
 fn run_remote_target(config: &Config, target: &str) -> Result<()> {
     let resolved_target = resolve_app_target(target);
     let client = client::get_or_ensure_client(config)?;
-    println!("[rdp-launcher] Requesting Windows agent via TCP to launch '{}'...", resolved_target);
+    log::info!("[rdp-launcher] Requesting Windows agent via TCP to launch '{}'...", resolved_target);
     client.run_target(&resolved_target, None)?;
     Ok(())
 }
@@ -758,6 +781,8 @@ pub fn stop_remote_daemon(config: &Config) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let _logger = init_logging();
+
     let cli = Cli::parse();
     let (mut config, config_path) = Config::load_or_create(cli.config.as_deref())?;
 

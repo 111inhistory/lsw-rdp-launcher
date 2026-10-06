@@ -176,7 +176,7 @@ pub fn get_or_ensure_client(config: &Config) -> Result<AgentClient> {
     }
 
     // 2. Slow path: Agent not responding, ensure FreeRDP session and VM are awake
-    println!("[rdp-launcher] Agent at {}:{} is not reachable, ensuring RDP session...", host, client.port);
+    log::info!("[rdp-launcher] Agent at {}:{} is not reachable, ensuring RDP session...", host, client.port);
     crate::ensure_freerdp_session(config)?;
 
     // 3. Wait up to 10 seconds for the TCP listener to come online
@@ -184,7 +184,7 @@ pub fn get_or_ensure_client(config: &Config) -> Result<AgentClient> {
     while start.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(500));
         if client.ping().is_ok() {
-            println!("[rdp-launcher] TCP agent at {}:{} connected successfully!", host, client.port);
+            log::info!("[rdp-launcher] TCP agent at {}:{} connected successfully!", host, client.port);
             return Ok(client);
         }
     }

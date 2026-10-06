@@ -195,7 +195,7 @@ pub fn count_active_rdp_windows() -> Result<(usize, Vec<String>)> {
 pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
     let state = get_vm_state(vm_name)?;
     if state.is_paused() {
-        println!("[lifecycle] VM '{}' is currently paused/suspended. Resuming...", vm_name);
+        log::info!("[lifecycle] VM '{}' is currently paused/suspended. Resuming...", vm_name);
         let status = Command::new("virsh")
             .env("LC_ALL", "C")
             .args(&["resume", vm_name])
@@ -206,7 +206,7 @@ pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(600));
     } else if state.is_shut_off() {
-        println!("[lifecycle] VM '{}' is shut off. Starting...", vm_name);
+        log::info!("[lifecycle] VM '{}' is shut off. Starting...", vm_name);
         let status = Command::new("virsh")
             .env("LC_ALL", "C")
             .args(&["start", vm_name])
@@ -215,14 +215,14 @@ pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
         if !status.success() {
             bail!("Failed to start VM '{}'", vm_name);
         }
-        println!("[lifecycle] Waiting for VM guest to initialize network...");
+        log::info!("[lifecycle] Waiting for VM guest to initialize network...");
         std::thread::sleep(Duration::from_secs(5));
     }
     Ok(())
 }
 
 pub fn reclaim_virtio_mem(vm_name: &str, alias: &str) -> Result<()> {
-    println!("[lifecycle] Reclaiming virtio-mem device '{}' memory back to host...", alias);
+    log::info!("[lifecycle] Reclaiming virtio-mem device '{}' memory back to host...", alias);
     let status = Command::new("virsh")
         .env("LC_ALL", "C")
         .args(&[
@@ -238,15 +238,15 @@ pub fn reclaim_virtio_mem(vm_name: &str, alias: &str) -> Result<()> {
         .context("Failed to update virtio-mem requested-size")?;
 
     if !status.success() {
-        eprintln!("[lifecycle] Warning: update-memory-device returned non-zero code");
+        log::warn!("[lifecycle] Warning: update-memory-device returned non-zero code");
     } else {
-        println!("[lifecycle] virtio-mem dynamic memory reclaimed successfully.");
+        log::info!("[lifecycle] virtio-mem dynamic memory reclaimed successfully.");
     }
     Ok(())
 }
 
 pub fn suspend_vm(vm_name: &str) -> Result<()> {
-    println!("[lifecycle] Suspending VM '{}' to RAM...", vm_name);
+    log::info!("[lifecycle] Suspending VM '{}' to RAM...", vm_name);
     let status = Command::new("virsh")
         .env("LC_ALL", "C")
         .args(&["suspend", vm_name])
@@ -256,7 +256,7 @@ pub fn suspend_vm(vm_name: &str) -> Result<()> {
     if !status.success() {
         anyhow::bail!("Failed to suspend VM '{}'", vm_name);
     }
-    println!("[lifecycle] VM '{}' is now suspended (CPU 0%).", vm_name);
+    log::info!("[lifecycle] VM '{}' is now suspended (CPU 0%).", vm_name);
     Ok(())
 }
 
@@ -265,8 +265,8 @@ pub fn run_watcher(config: Config) -> Result<()> {
     let rdp_timeout_secs = config.lifecycle.idle_disconnect_timeout;
     let vm_timeout_secs = config.lifecycle.vm_suspend_timeout;
 
-    println!("[lifecycle] Starting lifecycle watcher for VM '{}'...", vm_name);
-    println!("[lifecycle] Idle disconnect timeout: {}s, VM suspend timeout: {}s", rdp_timeout_secs, vm_timeout_secs);
+    log::info!("[lifecycle] Starting lifecycle watcher for VM '{}'...", vm_name);
+    log::info!("[lifecycle] Idle disconnect timeout: {}s, VM suspend timeout: {}s", rdp_timeout_secs, vm_timeout_secs);
 
     let mut rdp_idle_start: Option<Instant> = None;
     let mut vm_idle_start: Option<Instant> = None;
@@ -311,7 +311,7 @@ pub fn run_watcher(config: Config) -> Result<()> {
             match count_active_rdp_windows() {
                 Ok(res) => res,
                 Err(e) => {
-                    eprintln!("[lifecycle] Warning: Cannot query compositor windows: {}. Inhibiting idle disconnect.", e);
+                    log::warn!("[lifecycle] Warning: Cannot query compositor windows: {}. Inhibiting idle disconnect.", e);
                     // Safe error handling: do NOT assume 0 windows when query fails!
                     rdp_idle_start = None;
                     (1, vec![])
@@ -333,7 +333,7 @@ pub fn run_watcher(config: Config) -> Result<()> {
             } else {
                 let start = rdp_idle_start.get_or_insert_with(Instant::now);
                 if rdp_timeout_secs > 0 && start.elapsed() >= Duration::from_secs(rdp_timeout_secs) {
-                    println!("[lifecycle] No RemoteApp windows open for {}s. Disconnecting FreeRDP session...", rdp_timeout_secs);
+                    log::warn!("[lifecycle] No RemoteApp windows open for {}s. Disconnecting FreeRDP session...", rdp_timeout_secs);
                     let _ = crate::stop_remote_daemon(&config);
                     rdp_idle_start = None;
                 }
@@ -347,7 +347,7 @@ pub fn run_watcher(config: Config) -> Result<()> {
         if !freerdp_active && !ssh_active {
             let start = vm_idle_start.get_or_insert_with(Instant::now);
             if vm_timeout_secs > 0 && start.elapsed() >= Duration::from_secs(vm_timeout_secs) {
-                println!("[lifecycle] Inactivity timeout ({}s) reached. Preparing VM suspend...", vm_timeout_secs);
+                log::warn!("[lifecycle] Inactivity timeout ({}s) reached. Preparing VM suspend...", vm_timeout_secs);
                 if config.lifecycle.reclaim_virtio_mem {
                     let _ = reclaim_virtio_mem(vm_name, &config.lifecycle.virtio_mem_alias);
                 }
