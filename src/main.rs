@@ -507,7 +507,6 @@ fn ensure_freerdp_session(config: &Config) -> Result<()> {
 
     let log_file = fs::OpenOptions::new()
         .create(true)
-        .write(true)
         .append(true)
         .open(&log_path)
         .with_context(|| format!("Failed to open log file at {:?}", log_path))?;
@@ -680,7 +679,7 @@ fn list_cached_apps() -> Result<()> {
     let data = fs::read_to_string(&apps_cache_file)?;
     let apps: Vec<RemoteAppInfo> = serde_json::from_str(&data)?;
 
-    println!("{:<20} {:<30} {:<6} {}", "ID", "NAME", "TYPE", "TARGET");
+    println!("{:<20} {:<30} {:<6} TARGET", "ID", "NAME", "TYPE");
     println!("{}", "-".repeat(80));
     for app in apps {
         println!("{:<20} {:<30} {:<6} {}", app.id, app.name, app.app_type, app.target);
@@ -859,7 +858,7 @@ fn main() -> Result<()> {
                 }
                 ConfigAction::List => {
                     println!("Configuration File: {:?}\n", config_path);
-                    println!("{:<36} {:<14} {:<24} {}", "KEY", "TYPE", "CURRENT VALUE", "DESCRIPTION");
+                    println!("{:<36} {:<14} {:<24} DESCRIPTION", "KEY", "TYPE", "CURRENT VALUE");
                     println!("{}", "-".repeat(110));
                     for (k, t, val, desc) in config.list_keys() {
                         println!("{:<36} {:<14} {:<24} {}", k, t, val, desc);

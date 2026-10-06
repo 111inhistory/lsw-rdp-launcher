@@ -20,12 +20,12 @@
 │  2. Translate Linux path to Windows drive (via mounts table) │
 │  3. If VM is paused/suspended: wake via `virsh resume`       │
 │  4. If FreeRDP is down: spawn FreeRDP daemon session         │
-│  5. Send dispatch command via SSH to Windows guest           │
+│  5. Send JSON-RPC command via direct TCP socket (port 49152)│
 └──────────────────────────────┬──────────────────────────────┘
                                │
                   ┌────────────┴────────────┐
-                  │ SSH Command             │ RDP / RAIL
-                  │ (daemon_app run <path>) │ (Port 3389)
+                  │ TCP JSON-RPC (Port 49152)│ RDP / RAIL
+                  │ (sub-millisecond latency│ (Port 3389)
                   ▼                         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Windows Guest (Session 2 / Interactive User Session)       │
@@ -33,14 +33,13 @@
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  remoteapp-launcher.exe (Daemon in Session 2)         │  │
 │  │  - FreeRDP RAIL entry point                           │  │
+│  │  - Win32 Mutex Singleton: Local\RemoteAppLauncher...  │  │
 │  │  - System tray icon with keep-alive power states       │  │
-│  │  - Named pipe server: \\.\pipe\remoteapp_launcher     │  │
-│  │  - FIFO Worker Queue (processes commands in order)    │  │
+│  │  - TCP JSON-RPC listener on port 49152                │  │
+│  │  - flexi_logger rolling log (1MB limit, 1 backup)     │  │
+│  │  - Native Win32 GetExtendedTcpTable (active SSH count)│  │
+│  │  - Native Win32 WNetGetConnectionW (network drives)   │  │
 │  └───────────────────────────▲───────────────────────────┘  │
-│                              │ Named Pipe IPC               │
-│  ┌───────────────────────────┴───────────────────────────┐  │
-│  │  remoteapp-launcher.exe (CLI client from SSH)         │  │
-│  └───────────────────────────────────────────────────────┘  │
 │                              │                              │
 │                              ▼                              │
 │  ShellExecuteExW (Open verb on target / document)           │

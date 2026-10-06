@@ -63,7 +63,7 @@ pub fn sync_mount_table(config: &mut Config) -> Result<Vec<(String, String, Stri
 
     for (drive, provider) in win_drives {
         let clean_provider = provider.replace('/', "\\");
-        let share_name = clean_provider.trim_end_matches('\\').split('\\').last().unwrap_or("");
+        let share_name = clean_provider.trim_end_matches('\\').split('\\').next_back().unwrap_or("");
         
         // Find matching Samba share
         if let Some(host_path) = shares.get(share_name) {
@@ -137,7 +137,7 @@ pub fn path_to_linux(config: &Config, win_path_str: &str) -> Result<String> {
         bail!("Invalid Windows path: '{}'. Expected drive letter like 'X:\\...'.", win_path_str);
     }
 
-    let drive = format!("{}:", &trimmed[..1].to_ascii_uppercase());
+    let drive = format!("{}:", trimmed[..1].to_ascii_uppercase());
     let remainder = if trimmed.len() > 2 {
         &trimmed[2..]
     } else {
@@ -171,7 +171,7 @@ pub fn show_mounts(config: &Config) {
         return;
     }
 
-    println!("{:<18} {:<36} {}", "WINDOWS DRIVE", "LINUX HOST PATH", "STATUS");
+    println!("{:<18} {:<36} STATUS", "WINDOWS DRIVE", "LINUX HOST PATH");
     println!("{}", "-".repeat(75));
 
     let mut keys: Vec<&String> = config.mounts.keys().collect();

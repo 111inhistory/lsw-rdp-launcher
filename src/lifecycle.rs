@@ -58,7 +58,7 @@ impl VmState {
 pub fn get_vm_state(vm_name: &str) -> Result<VmState> {
     let output = Command::new("virsh")
         .env("LC_ALL", "C")
-        .args(&["domstate", vm_name])
+        .args(["domstate", vm_name])
         .output()
         .context("Failed to execute virsh domstate")?;
 
@@ -70,7 +70,7 @@ pub fn get_vm_ips(vm_name: &str) -> Vec<String> {
     let mut ips = Vec::new();
 
     // 1. Try qemu guest agent first (reads all interfaces from inside Windows)
-    if let Ok(out) = Command::new("virsh").args(&["domifaddr", vm_name, "--source", "agent"]).output() {
+    if let Ok(out) = Command::new("virsh").args(["domifaddr", vm_name, "--source", "agent"]).output() {
         if out.status.success() {
             parse_domifaddr(&String::from_utf8_lossy(&out.stdout), &mut ips);
         }
@@ -78,7 +78,7 @@ pub fn get_vm_ips(vm_name: &str) -> Vec<String> {
 
     // 2. Fallback to DHCP lease table if guest agent returned nothing
     if ips.is_empty() {
-        if let Ok(out) = Command::new("virsh").args(&["domifaddr", vm_name]).output() {
+        if let Ok(out) = Command::new("virsh").args(["domifaddr", vm_name]).output() {
             if out.status.success() {
                 parse_domifaddr(&String::from_utf8_lossy(&out.stdout), &mut ips);
             }
@@ -112,7 +112,7 @@ pub fn has_active_ssh(vm_ips: &[String], fallback_host: &str) -> bool {
     for ip in targets {
         // Check for established TCP connections on port 22
         let filter = format!("dport = :22 and dst {}", ip);
-        if let Ok(out) = Command::new("ss").args(&["-Htn", &filter]).output() {
+        if let Ok(out) = Command::new("ss").args(["-Htn", &filter]).output() {
             let text = String::from_utf8_lossy(&out.stdout);
             if text.lines().any(|l| l.contains("ESTAB")) {
                 return true;
@@ -161,7 +161,7 @@ fn resolve_niri_socket() -> Option<PathBuf> {
 /// Counts active FreeRDP RemoteApp client windows in the compositor with explicit error handling.
 pub fn count_active_rdp_windows() -> Result<(usize, Vec<String>)> {
     let mut cmd = Command::new("niri");
-    cmd.args(&["msg", "-j", "windows"]);
+    cmd.args(["msg", "-j", "windows"]);
 
     // Apply socket fallback if missing from environment (e.g. inside systemd service)
     if let Some(sock_path) = resolve_niri_socket() {
@@ -198,7 +198,7 @@ pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
         log::info!("[lifecycle] VM '{}' is currently paused/suspended. Resuming...", vm_name);
         let status = Command::new("virsh")
             .env("LC_ALL", "C")
-            .args(&["resume", vm_name])
+            .args(["resume", vm_name])
             .status()
             .context("Failed to resume VM via virsh")?;
         if !status.success() {
@@ -209,7 +209,7 @@ pub fn resume_vm_if_needed(vm_name: &str) -> Result<()> {
         log::info!("[lifecycle] VM '{}' is shut off. Starting...", vm_name);
         let status = Command::new("virsh")
             .env("LC_ALL", "C")
-            .args(&["start", vm_name])
+            .args(["start", vm_name])
             .status()
             .context("Failed to start VM via virsh")?;
         if !status.success() {
@@ -225,7 +225,7 @@ pub fn reclaim_virtio_mem(vm_name: &str, alias: &str) -> Result<()> {
     log::info!("[lifecycle] Reclaiming virtio-mem device '{}' memory back to host...", alias);
     let status = Command::new("virsh")
         .env("LC_ALL", "C")
-        .args(&[
+        .args([
             "update-memory-device",
             vm_name,
             "--alias",
@@ -249,7 +249,7 @@ pub fn suspend_vm(vm_name: &str) -> Result<()> {
     log::info!("[lifecycle] Suspending VM '{}' to RAM...", vm_name);
     let status = Command::new("virsh")
         .env("LC_ALL", "C")
-        .args(&["suspend", vm_name])
+        .args(["suspend", vm_name])
         .status()
         .context("Failed to suspend VM via virsh")?;
 

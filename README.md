@@ -27,7 +27,7 @@ An end-to-end RemoteApp integration and automated VM lifecycle management workfl
 Linux Host (Wayland / Niri)                             Windows 11 KVM Guest
 ┌──────────────────────────────┐                       ┌──────────────────────────────┐
 │  Desktop Launchers / CLI     │                       │  remoteapp-launcher.exe      │
-│  (rdp-launcher run <app>)    │                       │  (Tray Daemon, Named Pipe)   │
+│  (rdp-launcher run <app>)    │                       │  (Tray Daemon, Mutex Singleton)
 └──────────────┬───────────────┘                       └──────────────▲───────────────┘
                │                                                      │
                ├───────> Secret Service (Keyring)                     │
@@ -35,8 +35,8 @@ Linux Host (Wayland / Niri)                             Windows 11 KVM Guest
                ├───────> Libvirt Hook / virsh ────────────────────────┤
                │         (resume, suspend, virtio-mem)                │
                │                                                      │
-               ├───────> SSH Pipe ────────────────────────────────────┘
-               │         (Named pipe IPC: run / ping / stop / list)   │
+               ├───────> TCP JSON-RPC (Port 49152) ───────────────────┘
+               │         (run / open / list_apps / drives / status)   │
                │                                                      │
 ┌──────────────▼───────────────┐                       ┌──────────────▼───────────────┐
 │  FreeRDP (SDL3) Client       │◄═══════ RDP / RAIL ═══╡  Windows Desktop / DWM       │
@@ -52,13 +52,20 @@ Linux Host (Wayland / Niri)                             Windows 11 KVM Guest
 .
 ├── Cargo.toml               # Linux host launcher package manifest
 ├── src/                     # Linux host launcher source code
+│   ├── client.rs            # TCP JSON-RPC agent client & request dispatcher
 │   ├── config.rs            # TOML config management & CLI getter/setters
 │   ├── lifecycle.rs         # Background watcher (SSH guard, idle & virtio-mem)
+│   ├── mounts.rs            # Samba sync & bidirectional path translation
 │   └── main.rs              # CLI entry point, FreeRDP spawner & app launcher
 ├── windows-agent/           # Windows guest daemon source code
 │   ├── Cargo.toml           # Windows guest agent manifest
 │   ├── install.ps1          # Windows guest installation & registry setup script
-│   └── src/main.rs          # Daemon, named pipe IPC, 256x256 icon extractor
+│   └── src/main.rs          # Daemon, TCP JSON-RPC server, 256x256 icon extractor
+├── docs/                    # Architectural & operational documentation
+│   ├── architecture.md      # Detailed system architecture & sequence flows
+│   ├── configuration.md     # Configuration keys & CLI options reference
+│   ├── mounts-and-paths.md  # Mount discovery & bidirectional path translation
+│   └── vm-lifecycle.md      # Inactivity rules, virtio-mem reclaim, & SSH guard
 ├── scripts/                 # Systemd, SELinux, and host deployment scripts
 │   ├── install-host.sh      # Linux host installation script
 │   ├── uninstall-host.sh    # Linux host uninstallation script

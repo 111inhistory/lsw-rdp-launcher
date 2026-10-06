@@ -51,12 +51,13 @@ This ensures zero background overhead on the host when the VM is not running.
 
 If you are connected to the Windows guest via SSH (for remote terminal work, compilation, or diagnostics), the VM must **never** suspend unexpectedly.
 
-The lifecycle watcher inspects active TCP sockets directly on the host using `ss`:
+The lifecycle watcher employs a dual-tier protection mechanism:
+1. **Primary (Windows Kernel Win32 API)**: Queries `remoteapp-launcher.exe` via TCP JSON-RPC (`status` action). The Windows agent executes native Win32 `GetExtendedTcpTable` (from `iphlpapi.dll`) to count all active IPv4 and IPv6 connections on port 22 in `MIB_TCP_STATE_ESTAB` directly inside the Windows kernel.
+2. **Fallback (Host `ss` Probe)**: If the agent is unreachable or recovering, the host watcher resolves all dynamic IP addresses assigned to the VM (via QEMU Guest Agent `virsh domifaddr`) and inspects sockets on the host bridge:
 ```bash
 ss -Htn 'dport = :22 and dst <vm_ip>'
 ```
-- The watcher dynamically resolves all IP addresses assigned to the VM (via QEMU Guest Agent `virsh domifaddr`).
-- If any socket in state `ESTAB` is detected on port 22, the suspend timer is immediately reset.
+- If any active SSH socket in state `ESTAB` is detected by either mechanism, the suspend timer is immediately reset.
 
 ---
 

@@ -24,7 +24,6 @@ use windows_sys::Win32::System::Com::*;
 use windows_sys::Win32::System::Console::*;
 use windows_sys::Win32::System::LibraryLoader::*;
 use windows_sys::Win32::System::Memory::*;
-use windows_sys::Win32::System::Pipes::*;
 use windows_sys::Win32::System::Power::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -134,7 +133,6 @@ struct IPersistFileVtbl {
     pub GetCurFile: usize,
 }
 
-const PIPE_NAME: &str = "\\\\.\\pipe\\remoteapp_launcher";
 const WM_TRAYICON: u32 = WM_USER + 1;
 const ID_TRAY_EXIT: usize = 1001;
 const ID_TRAY_ABOUT: usize = 1002;
@@ -248,7 +246,9 @@ fn sanitize_id(name: &str) -> String {
     }
 }
 
-fn parse_lnk_file(sl: *mut std::ffi::c_void, pf: *mut std::ffi::c_void, lnk_path: &Path) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+type ShortcutTarget = (String, Option<String>, Option<String>, Option<String>);
+
+fn parse_lnk_file(sl: *mut std::ffi::c_void, pf: *mut std::ffi::c_void, lnk_path: &Path) -> Option<ShortcutTarget> {
     unsafe {
         let vtbl_sl = *(sl as *const *const IShellLinkWVtbl);
         let vtbl_pf = *(pf as *const *const IPersistFileVtbl);
@@ -347,14 +347,14 @@ fn scan_shortcuts(with_icons: bool) -> Vec<AppInfo> {
     }
 
     let mut result: Vec<AppInfo> = apps.into_values().collect();
-    result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result.sort_by_key(|a| a.name.to_lowercase());
     result
 }
 
 fn scan_uwp_apps(apps: &mut HashMap<String, AppInfo>) {
     use std::process::Command;
     let output = Command::new("powershell.exe")
-        .args(&[
+        .args([
             "-NoProfile",
             "-Command",
             "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-StartApps | Where-Object { $_.AppID -match '!' } | Select-Object Name, AppID | ConvertTo-Json",
@@ -373,22 +373,7 @@ fn scan_uwp_apps(apps: &mut HashMap<String, AppInfo>) {
             if let Ok(items) = serde_json::from_str::<Vec<StartAppItem>>(&text) {
                 for item in items {
                     let norm_key = item.AppID.to_lowercase();
-                    if !apps.contains_key(&norm_key) {
-                        apps.insert(norm_key, AppInfo {
-                            id: sanitize_id(&item.Name),
-                            name: item.Name,
-                            app_type: "uwp".to_string(),
-                            target: item.AppID,
-                            arguments: None,
-                            working_dir: None,
-                            icon_base64: None,
-                        });
-                    }
-                }
-            } else if let Ok(item) = serde_json::from_str::<StartAppItem>(&text) {
-                let norm_key = item.AppID.to_lowercase();
-                if !apps.contains_key(&norm_key) {
-                    apps.insert(norm_key, AppInfo {
+                    apps.entry(norm_key).or_insert_with(|| AppInfo {
                         id: sanitize_id(&item.Name),
                         name: item.Name,
                         app_type: "uwp".to_string(),
@@ -398,6 +383,17 @@ fn scan_uwp_apps(apps: &mut HashMap<String, AppInfo>) {
                         icon_base64: None,
                     });
                 }
+            } else if let Ok(item) = serde_json::from_str::<StartAppItem>(&text) {
+                let norm_key = item.AppID.to_lowercase();
+                apps.entry(norm_key).or_insert_with(|| AppInfo {
+                    id: sanitize_id(&item.Name),
+                    name: item.Name,
+                    app_type: "uwp".to_string(),
+                    target: item.AppID,
+                    arguments: None,
+                    working_dir: None,
+                    icon_base64: None,
+                });
             }
         }
     }
@@ -777,7 +773,7 @@ fn run_daemon(bind_addr: std::net::SocketAddr) {
             window_name.as_ptr(),
             0,
             0, 0, 0, 0,
-            -3 as isize as HWND, // HWND_MESSAGE (message-only window)
+            -3_isize as HWND, // HWND_MESSAGE (message-only window)
             ptr::null_mut(),
             wc.hInstance,
             ptr::null_mut(),
@@ -824,74 +820,6 @@ fn run_daemon(bind_addr: std::net::SocketAddr) {
                     log::error!("CRITICAL ERROR: Failed to bind TCP listener on {}: {}", bind_addr, e);
                     eprintln!("Failed to bind TCP listener on {}: {}", bind_addr, e);
                 }
-            }
-        });
-
-        // Sequential FIFO task queue: multiple commands are processed strictly in arrival order
-        let (task_tx, task_rx) = std::sync::mpsc::channel::<LaunchTask>();
-        std::thread::spawn(move || {
-            while let Ok(task) = task_rx.recv() {
-                match task {
-                    LaunchTask::Launch { target, params } => {
-                        launch_application(&target, params.as_deref());
-                        std::thread::sleep(std::time::Duration::from_millis(150));
-                    }
-                    LaunchTask::Quit => break,
-                }
-            }
-        });
-
-        let hwnd_for_pipe = hwnd as usize;
-        let pipe_tx = task_tx.clone();
-        std::thread::spawn(move || {
-            let pipe_w = to_wide(PIPE_NAME);
-            while RUNNING.load(Ordering::SeqCst) {
-                let hpipe = CreateNamedPipeW(
-                    pipe_w.as_ptr(),
-                    PIPE_ACCESS_DUPLEX,
-                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                    1,
-                    4096,
-                    4096,
-                    0,
-                    ptr::null_mut(),
-                );
-
-                if hpipe == INVALID_HANDLE_VALUE {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    continue;
-                }
-
-                let connected = ConnectNamedPipe(hpipe, ptr::null_mut());
-                if connected != 0 || GetLastError() == ERROR_PIPE_CONNECTED {
-                    let mut buf = [0u8; 4096];
-                    let mut bytes_read = 0u32;
-                    if ReadFile(hpipe, buf.as_mut_ptr(), 4096, &mut bytes_read, ptr::null_mut()) != 0 && bytes_read > 0 {
-                        let msg = String::from_utf8_lossy(&buf[..bytes_read as usize]).trim().to_string();
-                        if msg == "PING" {
-                            // Health check probe, ignore without spawning any process
-                        } else if msg.starts_with("RUN ") {
-                            let cmd_to_run = msg[4..].trim().to_string();
-                            let _ = pipe_tx.send(LaunchTask::Launch { target: cmd_to_run, params: None });
-                        } else if msg.starts_with("RUN_PARAMS ") {
-                            let payload = msg[11..].trim().to_string();
-                            if let Some((app_file, params)) = payload.split_once('\t') {
-                                let _ = pipe_tx.send(LaunchTask::Launch {
-                                    target: app_file.to_string(),
-                                    params: Some(params.to_string()),
-                                });
-                            }
-                        } else if msg == "QUIT" || msg == "STOP" {
-                            let _ = pipe_tx.send(LaunchTask::Quit);
-                            PostMessageW(hwnd_for_pipe as HWND, WM_DESTROY, 0, 0);
-                            DisconnectNamedPipe(hpipe);
-                            CloseHandle(hpipe);
-                            break;
-                        }
-                    }
-                }
-                DisconnectNamedPipe(hpipe);
-                CloseHandle(hpipe);
             }
         });
 
@@ -977,17 +905,23 @@ fn resolve_target_and_params(args: &[String]) -> (String, Option<String>) {
     (clean_joined.to_string(), None)
 }
 
-fn send_pipe_command(command: &str) -> bool {
-    use std::fs::OpenOptions;
-    use std::io::Write;
+fn send_tcp_request(req: &AgentRequest) -> Result<AgentResponse, String> {
+    use std::io::{BufRead, BufReader, Write};
+    let addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        DEFAULT_TCP_PORT,
+    );
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+        .map_err(|e| format!("Daemon not reachable: {}", e))?;
+    let mut json = serde_json::to_string(req).map_err(|e| e.to_string())?;
+    json.push('\n');
+    stream.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())?;
 
-    if let Ok(mut file) = OpenOptions::new().write(true).open(PIPE_NAME) {
-        if file.write_all(command.as_bytes()).is_ok() {
-            let _ = file.flush();
-            return true;
-        }
-    }
-    false
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+    serde_json::from_str(&line).map_err(|e| e.to_string())
 }
 
 fn main() {
@@ -1031,7 +965,7 @@ fn main() {
             std::process::exit(0);
         }
         "ping" => {
-            if send_pipe_command("PING") {
+            if send_tcp_request(&AgentRequest::Ping).is_ok() {
                 print_to_stdout("PONG\r\n");
                 std::process::exit(0);
             } else {
@@ -1041,16 +975,15 @@ fn main() {
         "run" => {
             if args.len() > 2 {
                 let (target, params_opt) = resolve_target_and_params(&args[2..]);
-                let msg = if let Some(ref params) = params_opt {
-                    format!("RUN_PARAMS {}\t{}", target, params)
-                } else {
-                    format!("RUN {}", target)
+                let req = AgentRequest::Run {
+                    target: target.clone(),
+                    params: params_opt,
                 };
-                if send_pipe_command(&msg) {
-                    print_to_stdout(&format!("OK: {}\r\n", msg));
+                if send_tcp_request(&req).is_ok() {
+                    print_to_stdout(&format!("OK: {}\r\n", target));
                     std::process::exit(0);
                 } else {
-                    eprintln!("Daemon pipe not ready");
+                    eprintln!("Daemon not ready");
                     std::process::exit(1);
                 }
             } else {
@@ -1059,13 +992,17 @@ fn main() {
             }
         }
         "stop" | "quit" => {
-            if send_pipe_command("QUIT") {
+            if send_tcp_request(&AgentRequest::Quit).is_ok() {
                 print_to_stdout("RemoteApp daemon stopping...\r\n");
             } else {
                 eprintln!("RemoteApp daemon is not running.");
             }
         }
-        "daemon" | _ => {
+        "daemon" => {
+            let bind_addr = parse_bind_addr(&args);
+            run_daemon(bind_addr);
+        }
+        _ => {
             let bind_addr = parse_bind_addr(&args);
             run_daemon(bind_addr);
         }

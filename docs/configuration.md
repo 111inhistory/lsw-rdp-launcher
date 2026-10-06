@@ -31,6 +31,7 @@ rdp-launcher config show
 | `host` | `string` | `"auto"` | Windows guest IP or hostname (`"auto"` queries guest agent) |
 | `user` | `string` | `$USER` | Windows RDP user name |
 | `service` | `string` | `"rdp-bridge"` | Keyring service name for Secret Service password lookup |
+| `agent_port` | `u16` | `49152` | Windows Guest Agent TCP JSON-RPC listener port |
 
 ### `[freerdp]`
 | Key | Type | Default | Description |
