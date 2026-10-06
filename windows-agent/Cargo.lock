@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "remoteapp-launcher"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "flexi_logger",
  "log",
